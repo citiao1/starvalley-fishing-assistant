@@ -1,3 +1,4 @@
 # Experimental deployment path. Install in a separate environment.
-onnx
-onnxruntime-gpu
+onnx>=1.12,<2.0
+onnxslim
+onnxruntime-gpu==1.20.2
