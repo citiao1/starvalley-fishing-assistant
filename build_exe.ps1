@@ -17,6 +17,10 @@ if (-not (Test-Path (Join-Path $root "runs\fishing_yolo11n_v1\weights\best.pt"))
 }
 
 Push-Location $root
+$pyinstallerCache = Join-Path $root "build\.pyinstaller-cache"
+New-Item -ItemType Directory -Force -Path $pyinstallerCache | Out-Null
+$previousPyInstallerConfig = $env:PYINSTALLER_CONFIG_DIR
+$env:PYINSTALLER_CONFIG_DIR = $pyinstallerCache
 $pyinstallerArgs = @(
     "--noconfirm",
     "--clean",
@@ -54,6 +58,10 @@ $pyinstallerArgs = @(
     "--exclude-module", "keras",
     "--exclude-module", "onnx",
     "--exclude-module", "onnxruntime",
+    "--exclude-module", "onnxslim",
+    "--exclude-module", "sympy",
+    "--exclude-module", "ml_dtypes",
+    "--exclude-module", "protobuf",
     "--exclude-module", "tkinter",
     "run_app.py"
 )
@@ -71,6 +79,11 @@ try {
 }
 finally {
     $env:PATH = $originalPath
+    if ($null -eq $previousPyInstallerConfig) {
+        Remove-Item Env:PYINSTALLER_CONFIG_DIR -ErrorAction SilentlyContinue
+    } else {
+        $env:PYINSTALLER_CONFIG_DIR = $previousPyInstallerConfig
+    }
 }
 Pop-Location
 

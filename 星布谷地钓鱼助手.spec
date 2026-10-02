@@ -17,7 +17,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tensorboard', 'torch.utils.tensorboard', 'triton', 'polars', 'matplotlib', 'networkx', 'fontTools', 'pandas', 'scipy', 'tensorflow', 'keras', 'onnx', 'onnxruntime', 'tkinter'],
+    excludes=['tensorboard', 'torch.utils.tensorboard', 'triton', 'polars', 'matplotlib', 'networkx', 'fontTools', 'pandas', 'scipy', 'tensorflow', 'keras', 'onnx', 'onnxruntime', 'onnxslim', 'sympy', 'ml_dtypes', 'protobuf', 'tkinter'],
     noarchive=False,
     optimize=0,
 )
@@ -29,7 +29,6 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='星布谷地钓鱼助手',
-    icon='assets/app_icon.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -41,6 +40,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     uac_admin=True,
+    icon=['assets/app_icon.ico'],
 )
 coll = COLLECT(
     exe,

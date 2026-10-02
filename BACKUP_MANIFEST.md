@@ -5,15 +5,14 @@
 - `fishing_assistant/`：界面、检测、输入控制和配置源码
 - `run_app.py`：程序入口
 - `templates/`：自动喂食红色数字模板
-- `runs/fishing_yolo11n_v1/weights/best.pt`：当前运行模型
-- `models/best.onnx`：动态输入 ONNX 实验模型
+- `models/best.onnx`：当前发布模型
 - `assets/app_icon.ico`：应用图标
-- `build_exe.ps1`、`build_exe_onnx.ps1` 和 `*.spec`：EXE 构建配置
-- `fishing_assistant/onnx_detector.py` 和 `onnx_tools/`：ONNX GPU 实验代码
+- `build_exe_onnx.ps1` 和 `星布谷地钓鱼助手_ONNX_directml.spec`：EXE 构建配置
+- `fishing_assistant/onnx_detector.py` 和 `onnx_tools/`：ONNX 推理代码
 - `diagnose_fishing_assistant.py`、`opencv_feed_zero.py`、`rank_bite_frames.py`：诊断和数据分析工具
 - `requirements.txt`、交接文档和软件说明
 
-以下内容保留在本机但不上传：
+以下内容不属于项目运行必需内容，不上传也不保留在发布目录：
 
 - `tools/`：portable Python 和全部第三方运行库
 - `dist/`、`build/`：构建产物
@@ -25,4 +24,4 @@
 
 ## 当前推理路线
 
-当前默认运行链路仍是 PyTorch CUDA，作为准确率基线。下一步会在独立环境中导出 ONNX，并使用 ONNX Runtime GPU 做逐帧对比；确认预处理、框位置、置信度和触发逻辑一致后，再考虑裁剪 ONNX Runtime 运行库。
+当前默认发行链路是 ONNX Runtime DirectML。它保留 GPU 推理能力，同时将发布目录控制在约 325 MB。

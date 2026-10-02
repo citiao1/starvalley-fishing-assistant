@@ -27,6 +27,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $root "models\best.onnx"))) {
 }
 
 Push-Location $root
+$pyinstallerCache = Join-Path $root "build\.pyinstaller-cache"
+New-Item -ItemType Directory -Force -Path $pyinstallerCache | Out-Null
+$previousPyInstallerConfig = $env:PYINSTALLER_CONFIG_DIR
+$env:PYINSTALLER_CONFIG_DIR = $pyinstallerCache
 $pyinstallerArgs = @(
     "--noconfirm",
     "--clean",
@@ -74,6 +78,11 @@ try {
 }
 finally {
     $env:PATH = $originalPath
+    if ($null -eq $previousPyInstallerConfig) {
+        Remove-Item Env:PYINSTALLER_CONFIG_DIR -ErrorAction SilentlyContinue
+    } else {
+        $env:PYINSTALLER_CONFIG_DIR = $previousPyInstallerConfig
+    }
     Remove-Item Env:FISHING_ASSISTANT_BACKEND -ErrorAction SilentlyContinue
     Remove-Item Env:FISHING_ASSISTANT_ONNX_PROVIDER -ErrorAction SilentlyContinue
 }

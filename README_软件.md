@@ -1,6 +1,9 @@
 # 星布谷地自动钓鱼助手
 
-这是一个 Windows 桌面 GUI 原型，使用现有 `bite_icon` YOLO 权重识别上钩图标，使用固定 ROI 的 OpenCV 模板识别红色体力数字。
+这是一个 Windows 桌面 GUI，使用 YOLO/ONNX 识别上钩图标，使用固定 ROI 的 OpenCV 模板识别红色体力数字。
+
+当前发布版本使用 ONNX Runtime DirectML，体积约 325 MB，可使用 GPU 推理。旧的 PyTorch CUDA
+版本体积约 4 GB，已不作为发行版本。
 
 ## 安全默认值
 
@@ -15,27 +18,31 @@
 - 上钩模型默认置信度为 `0.02`。该模型在真实测试集上的有效分数明显低于通用
   YOLO 默认阈值，因此由连续多帧确认和只保留 `bite_icon` 类共同抑制误检。
 
-## 启动
+## 使用发布版本
+
+从 GitHub Releases 下载 `星布谷地钓鱼助手_ONNX_directml`，解压后运行目录中的
+`星布谷地钓鱼助手_ONNX_directml.exe`。必须保留整个目录，不能只复制 exe。
+
+## 从源码运行
 
 ```powershell
-.\tools\python312_portable\python.exe .\run_app.py
+python .\run_app_onnx.py
 ```
 
 启动后先保持预览模式，确认画面分辨率、上钩框和红色数字 ROI 正确，再由用户主动关闭预览模式并打开需要的自动动作。
 
-## 构建独立程序
+## 构建 DirectML 版本
 
 ```powershell
-.\build_exe.ps1
+.\build_exe_onnx.ps1 -Provider directml
 ```
 
-构建结果为 `dist\星布谷地钓鱼助手\星布谷地钓鱼助手.exe`，是 onedir 发行目录，模型和运行时依赖会一起放入目录。日志和设置写入 exe 同目录下的 `app_data`。
+构建结果为 `dist\星布谷地钓鱼助手_ONNX_directml`，模型和运行时依赖会一起放入目录。
+请把整个目录一起分发，不能只复制 exe，因为 Qt、ONNX Runtime、DirectML 和 OpenCV 的 DLL
+位于 `_internal` 目录。
 
-请把整个 `dist\星布谷地钓鱼助手` 文件夹一起分发。不能只复制其中的 exe，因为 Qt、Torch 和 OpenCV 的 DLL 位于 `_internal` 目录。
-
-当前构建是 GPU 版，约 4.1 GB，其中约 3.86 GB 是 CUDA 版 PyTorch、cuDNN 和 cuBLAS
-运行库；模型本身只有约 5 MB。若要显著缩小发行包，需要另做 CPU 版运行时，或改为
-ONNX Runtime 方案，不能只删除 `_internal\torch\lib` 中的 DLL。
+构建脚本默认把 PyInstaller 缓存写入项目下的 `build\.pyinstaller-cache`，不会把项目依赖下载到
+C 盘。
 
 ## 排障
 
