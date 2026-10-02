@@ -18,12 +18,14 @@ class OnnxBiteDetector:
         image_size: int,
         use_cuda: bool,
         dll_search_paths: tuple[Path, ...] = (),
+        execution_provider: str = "cuda",
     ) -> None:
         self.model_path = model_path
         self.confidence = confidence
         self.image_size = image_size
         self.use_cuda = use_cuda
         self.dll_search_paths = dll_search_paths
+        self.execution_provider = execution_provider
         self.session: Any = None
         self.input_name = ""
         self.device = "cpu"
@@ -47,9 +49,14 @@ class OnnxBiteDetector:
                 self._dll_handles.append(os.add_dll_directory(str(path)))
             os.environ["PATH"] = f"{path}{os.pathsep}{os.environ.get('PATH', '')}"
 
+        provider_name = {
+            "cuda": "CUDAExecutionProvider",
+            "directml": "DmlExecutionProvider",
+            "cpu": "CPUExecutionProvider",
+        }.get(self.execution_provider, "CPUExecutionProvider")
         requested = (
-            ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            if self.use_cuda
+            [provider_name, "CPUExecutionProvider"]
+            if provider_name != "CPUExecutionProvider"
             else ["CPUExecutionProvider"]
         )
         self.session = ort.InferenceSession(
@@ -58,11 +65,15 @@ class OnnxBiteDetector:
         )
         self.input_name = self.session.get_inputs()[0].name
         active = self.session.get_providers()
-        self.device = (
-            "cuda"
-            if self.use_cuda and "CUDAExecutionProvider" in active
-            else "cpu"
+        active_provider = next(
+            (name for name in requested if name in active),
+            "CPUExecutionProvider",
         )
+        self.device = {
+            "CUDAExecutionProvider": "cuda",
+            "DmlExecutionProvider": "directml",
+            "CPUExecutionProvider": "cpu",
+        }[active_provider]
 
     def configure(self, confidence: float, use_cuda: bool) -> bool:
         previous_device = self.device

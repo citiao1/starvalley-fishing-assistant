@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -36,6 +37,8 @@ class AppSettings:
     use_cuda: bool = True
     input_method: str = "sendinput_scan"
     monitor_index: int = 0
+    inference_backend: str = "pytorch"
+    onnx_provider: str = "cuda"
 
 
 class AppPaths:
@@ -57,6 +60,13 @@ class AppPaths:
         return self.root / "runs" / "fishing_yolo11n_v1" / "weights" / "best.pt"
 
     @property
+    def onnx_model_path(self) -> Path:
+        bundled = self.resources / "models" / "best.onnx"
+        if bundled.exists():
+            return bundled
+        return self.root / "models" / "best.onnx"
+
+    @property
     def icon_path(self) -> Path:
         return self.resources / "assets" / "app_icon.ico"
 
@@ -70,15 +80,23 @@ class AppPaths:
 
 
 def load_settings(paths: AppPaths) -> AppSettings:
-    if not paths.settings_file.exists():
-        return AppSettings()
+    defaults = asdict(AppSettings())
     try:
-        values = json.loads(paths.settings_file.read_text(encoding="utf-8"))
-        defaults = asdict(AppSettings())
-        defaults.update({key: value for key, value in values.items() if key in defaults})
-        return AppSettings(**defaults)
+        if paths.settings_file.exists():
+            values = json.loads(paths.settings_file.read_text(encoding="utf-8"))
+            defaults.update(
+                {key: value for key, value in values.items() if key in defaults}
+            )
     except (OSError, TypeError, ValueError):
-        return AppSettings()
+        pass
+
+    backend = os.environ.get("FISHING_ASSISTANT_BACKEND", "").strip().lower()
+    provider = os.environ.get("FISHING_ASSISTANT_ONNX_PROVIDER", "").strip().lower()
+    if backend in {"pytorch", "onnx"}:
+        defaults["inference_backend"] = backend
+    if provider in {"cuda", "directml", "cpu"}:
+        defaults["onnx_provider"] = provider
+    return AppSettings(**defaults)
 
 
 def save_settings(paths: AppPaths, settings: AppSettings) -> None:

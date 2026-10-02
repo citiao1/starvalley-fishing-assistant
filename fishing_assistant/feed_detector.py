@@ -13,6 +13,14 @@ DIGIT_ROI = (2078, 1168, 2140, 1230)
 CANONICAL_SIZE = (48, 64)
 
 
+def read_image(path: Path) -> np.ndarray | None:
+    """Read images from Windows paths that may contain non-ASCII characters."""
+    data = np.fromfile(str(path), dtype=np.uint8)
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+
 def scaled_roi(width: int, height: int) -> tuple[int, int, int, int]:
     sx = width / BASE_WIDTH
     sy = height / BASE_HEIGHT
@@ -111,8 +119,8 @@ class FeedZeroDetector:
 
     @classmethod
     def from_images(cls, zero_path: Path, nonzero_path: Path) -> "FeedZeroDetector":
-        zero_image = cv2.imread(str(zero_path))
-        nonzero_image = cv2.imread(str(nonzero_path))
+        zero_image = read_image(zero_path)
+        nonzero_image = read_image(nonzero_path)
         if zero_image is None:
             raise FileNotFoundError(zero_path)
         if nonzero_image is None:

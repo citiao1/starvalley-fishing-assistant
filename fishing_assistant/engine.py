@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -16,6 +17,7 @@ from PySide6.QtGui import QImage
 from .config import AppPaths, AppSettings
 from .feed_detector import FeedZeroDetector, scaled_roi
 from .input_control import WindowsInputController
+from .onnx_detector import OnnxBiteDetector
 
 
 class BiteDetector:
@@ -324,14 +326,40 @@ class DetectionWorker(QObject):
                     force=True,
                 )
 
-            if not self.paths.model_path.exists():
-                raise FileNotFoundError(f"找不到 YOLO 权重: {self.paths.model_path}")
-            self._bite = BiteDetector(
-                self.paths.model_path,
-                self.settings.confidence,
-                self.settings.yolo_imgsz,
-                self.settings.use_cuda,
-            )
+            if self.settings.inference_backend == "onnx":
+                if not self.paths.onnx_model_path.exists():
+                    raise FileNotFoundError(
+                        f"找不到 ONNX 权重: {self.paths.onnx_model_path}"
+                    )
+                torch_dll_dir = (
+                    Path(sys.prefix)
+                    / "Lib"
+                    / "site-packages"
+                    / "torch"
+                    / "lib"
+                )
+                dll_search_paths = (
+                    (torch_dll_dir,) if torch_dll_dir.exists() else ()
+                )
+                self._bite = OnnxBiteDetector(
+                    self.paths.onnx_model_path,
+                    self.settings.confidence,
+                    self.settings.yolo_imgsz,
+                    self.settings.use_cuda,
+                    dll_search_paths=dll_search_paths,
+                    execution_provider=self.settings.onnx_provider,
+                )
+            else:
+                if not self.paths.model_path.exists():
+                    raise FileNotFoundError(
+                        f"找不到 YOLO 权重: {self.paths.model_path}"
+                    )
+                self._bite = BiteDetector(
+                    self.paths.model_path,
+                    self.settings.confidence,
+                    self.settings.yolo_imgsz,
+                    self.settings.use_cuda,
+                )
             self._log("info", self._bite.load(), force=True)
 
             if not self.paths.zero_template_path.exists():

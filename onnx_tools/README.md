@@ -23,4 +23,11 @@ python onnx_tools\benchmark_backends.py `
   --images dataset_final\images\val
 ```
 
+如果需要验证不依赖 CUDA 运行库的 GPU 路线，可以安装 `onnxruntime-directml`，然后把
+`--provider cuda` 改成 `--provider directml`。DirectML 的包体明显更小，但性能需要按
+实际游戏画面实测，不能直接视为 CUDA 的等价替代。
+
+当前 DirectML 打包探针约为 325MB，已实际启动验证；它是独立入口，不会改变主程序的
+PyTorch CUDA 默认链路。
+
 只有在框位置、置信度和触发样本一致后，才进入 EXE 后端切换和运行库裁剪。

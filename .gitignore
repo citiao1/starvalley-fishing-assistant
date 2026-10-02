@@ -30,5 +30,8 @@ assets/app_icon.png
 assets/app_icon_cropped.png
 assets/app_icon_source.jpg
 
+# Generated PyInstaller specs for experimental builds
+*_ONNX_*.spec
+
 # User-provided source image stays local unless copied into assets/
 Gemini_Generated_Image_*.jpg

@@ -6,8 +6,9 @@
 - `run_app.py`：程序入口
 - `templates/`：自动喂食红色数字模板
 - `runs/fishing_yolo11n_v1/weights/best.pt`：当前运行模型
+- `models/best.onnx`：动态输入 ONNX 实验模型
 - `assets/app_icon.ico`：应用图标
-- `build_exe.ps1` 和 `*.spec`：EXE 构建配置
+- `build_exe.ps1`、`build_exe_onnx.ps1` 和 `*.spec`：EXE 构建配置
 - `fishing_assistant/onnx_detector.py` 和 `onnx_tools/`：ONNX GPU 实验代码
 - `diagnose_fishing_assistant.py`、`opencv_feed_zero.py`、`rank_bite_frames.py`：诊断和数据分析工具
 - `requirements.txt`、交接文档和软件说明

@@ -18,6 +18,11 @@ def main() -> int:
     parser.add_argument("--images", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=60)
     parser.add_argument("--imgsz", type=int, default=1280)
+    parser.add_argument(
+        "--provider",
+        choices=("cuda", "directml", "cpu"),
+        default="cuda",
+    )
     args = parser.parse_args()
 
     from ultralytics import YOLO
@@ -35,6 +40,7 @@ def main() -> int:
         image_size=args.imgsz,
         use_cuda=True,
         dll_search_paths=(torchlib,),
+        execution_provider=args.provider,
     )
     print(onnx.load())
 

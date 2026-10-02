@@ -14,5 +14,7 @@
   "yolo_imgsz": 1280,
   "use_cuda": true,
   "input_method": "sendinput_scan",
-  "monitor_index": 0
+  "monitor_index": 0,
+  "inference_backend": "pytorch",
+  "onnx_provider": "cuda"
 }
