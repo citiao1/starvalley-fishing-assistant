@@ -1,0 +1,18 @@
+{
+  "master_enabled": false,
+  "bite_detection_enabled": true,
+  "auto_reel_enabled": false,
+  "auto_feed_enabled": false,
+  "preview_only": true,
+  "confidence": 0.05,
+  "bite_action_confidence": 0.15,
+  "bite_confirm_frames": 1,
+  "feed_confirm_frames": 3,
+  "reel_cooldown_seconds": 1.5,
+  "inference_fps": 30.0,
+  "preview_fps": 30.0,
+  "yolo_imgsz": 1280,
+  "use_cuda": true,
+  "input_method": "sendinput_scan",
+  "monitor_index": 0
+}
