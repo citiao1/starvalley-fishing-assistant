@@ -5,19 +5,33 @@ import sys
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import replace
+from collections import deque
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QObject, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QImage
 
 from .config import AppPaths, AppSettings
 from .feed_detector import FeedZeroDetector, scaled_roi
+from .feed_state import FeedStateMachine
 from .input_control import WindowsInputController
 from .onnx_detector import OnnxBiteDetector
+
+
+@dataclass
+class DetectionResult:
+    boxes: list[tuple[int, int, int, int, float]]
+    bite_confidence: float
+    feed_label: str
+    zero_score: float
+    nonzero_score: float
+    inference_ms: float
+    captured_at: float
+    timing: dict[str, float]
 
 
 class BiteDetector:
@@ -34,6 +48,7 @@ class BiteDetector:
         self.use_cuda = use_cuda
         self.model: Any = None
         self.device = "cpu"
+        self.last_timing: dict[str, float] = {}
 
     def load(self) -> str:
         from ultralytics import YOLO
@@ -50,16 +65,18 @@ class BiteDetector:
         except Exception:
             self.device = "cpu"
 
-    def configure(self, confidence: float, use_cuda: bool) -> bool:
-        previous_device = self.device
+    def configure(self, confidence: float, use_cuda: bool, image_size: int) -> bool:
+        previous = (self.device, self.image_size)
         self.confidence = confidence
         self.use_cuda = use_cuda
+        self.image_size = int(image_size)
         self._refresh_device()
-        return self.device != previous_device
+        return (self.device, self.image_size) != previous
 
     def detect(self, frame: np.ndarray) -> tuple[list[tuple[int, int, int, int, float]], float]:
         if self.model is None:
             return [], 0.0
+        started = time.perf_counter()
         results = self.model.predict(
             source=frame,
             imgsz=self.image_size,
@@ -69,6 +86,10 @@ class BiteDetector:
             max_det=5,
             verbose=False,
         )
+        self.last_timing = {
+            "session_ms": (time.perf_counter() - started) * 1000,
+            "total_ms": (time.perf_counter() - started) * 1000,
+        }
         detections: list[tuple[int, int, int, int, float]] = []
         best_confidence = 0.0
         if not results:
@@ -92,7 +113,7 @@ class BiteDetector:
     @staticmethod
     def resize_for_inference(
         frame: np.ndarray,
-        max_width: int = 1280,
+        max_width: int = 960,
     ) -> tuple[np.ndarray, float, float]:
         height, width = frame.shape[:2]
         if width <= max_width:
@@ -220,6 +241,7 @@ class DetectionWorker(QObject):
     metrics_ready = Signal(object)
     status_ready = Signal(str)
     log_ready = Signal(str, str)
+    input_test_result = Signal(bool, str)
     finished = Signal()
 
     def __init__(self, paths: AppPaths, settings: AppSettings) -> None:
@@ -234,12 +256,19 @@ class DetectionWorker(QObject):
         self._input = WindowsInputController()
         self._logger = SessionLogger(paths.log_file)
         self._bite_streak = 0
-        self._zero_streak = 0
-        self._feed_waiting_confirmation = False
+        self._feed_state = FeedStateMachine(
+            settings.feed_confirm_frames,
+            settings.feed_min_interval_seconds,
+            settings.feed_retry_interval_seconds,
+            settings.feed_input_failure_limit,
+        )
         self._next_reel_at = 0.0
         self._last_status = "等待启动"
         self._last_action = "暂无动作"
         self._last_log_at: dict[str, float] = {}
+        self._settings_lock = threading.Lock()
+        self._pending_settings: AppSettings | None = None
+        self._emergency_requested = threading.Event()
         self._executor: ThreadPoolExecutor | None = None
         self._inference_future: Future | None = None
         self._latest_boxes: list[tuple[int, int, int, int, float]] = []
@@ -251,31 +280,92 @@ class DetectionWorker(QObject):
         self._bite_event_handled = False
         self._capture_frames = 0
         self._inference_frames = 0
+        self._inference_skipped = 0
         self._preview_started_at = 0.0
         self._last_metrics_at = 0.0
         self._last_inference_ms = 0.0
         self._last_capture_ms = 0.0
+        self._last_resize_ms = 0.0
+        self._last_feed_ms = 0.0
+        self._last_preview_ms = 0.0
+        self._last_qimage_ms = 0.0
+        self._last_result_age_ms = 0.0
+        self._stale_action_skips = 0
+        self._capture_times: deque[float] = deque()
+        self._inference_times: deque[float] = deque()
+        self._preview_times: deque[float] = deque()
+        self._timing_samples: dict[str, deque[float]] = {
+            "capture_ms": deque(maxlen=256),
+            "resize_ms": deque(maxlen=256),
+            "feed_ms": deque(maxlen=256),
+            "inference_ms": deque(maxlen=256),
+            "letterbox_ms": deque(maxlen=256),
+            "tensor_ms": deque(maxlen=256),
+            "session_ms": deque(maxlen=256),
+            "postprocess_ms": deque(maxlen=256),
+            "preview_ms": deque(maxlen=256),
+            "qimage_ms": deque(maxlen=256),
+        }
+        self._next_preview_at = 0.0
 
     @Slot(object)
     def apply_settings(self, settings: AppSettings) -> None:
-        self.settings = replace(settings)
-        if self._bite is not None:
-            device_changed = self._bite.configure(
-                settings.confidence,
-                settings.use_cuda,
+        # The slot only records the latest request. The run loop applies it
+        # after an in-flight inference future has completed.
+        with self._settings_lock:
+            self._pending_settings = replace(settings)
+
+    def _apply_pending_settings_if_idle(self) -> None:
+        if self._inference_future is not None:
+            return
+        with self._settings_lock:
+            settings = self._pending_settings
+            self._pending_settings = None
+        if settings is None:
+            return
+        if self._input.emergency_stopped:
+            settings = replace(
+                settings,
+                master_enabled=False,
+                auto_reel_enabled=False,
+                auto_feed_enabled=False,
             )
-            if device_changed:
+        previous = self.settings
+        self.settings = settings
+        self._feed_state.reconfigure(
+            settings.feed_confirm_frames,
+            settings.feed_min_interval_seconds,
+            settings.feed_retry_interval_seconds,
+            settings.feed_input_failure_limit,
+        )
+        if not settings.auto_feed_enabled or not settings.master_enabled:
+            self._feed_state.reset()
+        if self._bite is not None:
+            if isinstance(self._bite, OnnxBiteDetector):
+                changed = self._bite.configure(
+                    settings.confidence,
+                    settings.use_cuda,
+                    settings.yolo_imgsz,
+                    settings.onnx_provider,
+                )
+            else:
+                changed = self._bite.configure(
+                    settings.confidence,
+                    settings.use_cuda,
+                    settings.yolo_imgsz,
+                )
+            if changed or previous.onnx_provider != settings.onnx_provider:
                 self._log(
                     "info",
                     f"推理设备已切换为 {self._bite.device}",
                     force=True,
                 )
-        if not settings.master_enabled:
-            self._bite_streak = 0
-            self._zero_streak = 0
-            self._feed_waiting_confirmation = False
 
-    def emergency_stop_now(self) -> None:
+    @Slot()
+    def _apply_emergency_stop(self) -> None:
+        if not self._emergency_requested.is_set():
+            return
+        self._emergency_requested.clear()
         self._input.trigger_emergency_stop()
         self.settings = replace(
             self.settings,
@@ -284,12 +374,16 @@ class DetectionWorker(QObject):
             auto_feed_enabled=False,
         )
         self._bite_streak = 0
-        self._zero_streak = 0
-        self._feed_waiting_confirmation = False
+        self._feed_state.reset()
         self._set_status("紧急停止：输入已锁定")
         self._log("warning", "用户触发紧急停止，所有自动输入已锁定", force=True)
 
-    def test_input(self, action: str) -> tuple[bool, str]:
+    @Slot(str)
+    def test_input(self, action: str) -> None:
+        if self.settings.preview_only:
+            self._input.last_result = "预览模式已禁止输入测试"
+            self.input_test_result.emit(False, self._input.last_result)
+            return
         if action == "z":
             ok = self._input.press_z(self.settings.input_method)
         elif action == "left_click":
@@ -297,7 +391,7 @@ class DetectionWorker(QObject):
         else:
             self._input.last_result = f"未知输入测试动作: {action}"
             ok = False
-        return ok, self._input.last_result
+        self.input_test_result.emit(ok, self._input.last_result)
 
     def run(self) -> None:
         self._running = True
@@ -306,9 +400,15 @@ class DetectionWorker(QObject):
         self._capture_frames = 0
         self._inference_frames = 0
         self._bite_streak = 0
-        self._zero_streak = 0
-        self._feed_waiting_confirmation = False
+        self._feed_state.reset()
         self._bite_event_handled = False
+        self._inference_skipped = 0
+        self._capture_times.clear()
+        self._inference_times.clear()
+        self._preview_times.clear()
+        for samples in self._timing_samples.values():
+            samples.clear()
+        self._emergency_requested.clear()
         self._executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="fishing-inference",
@@ -374,22 +474,24 @@ class DetectionWorker(QObject):
             # Start the FPS window after model/template initialization so the
             # startup delay does not permanently depress the displayed rate.
             self._preview_started_at = time.perf_counter()
+            self._last_metrics_at = 0.0
+            self._next_preview_at = 0.0
             self._capture_frames = 0
             self._inference_frames = 0
             self._set_status("预览运行中")
 
-            preview_interval = 1.0 / max(
-                5.0,
-                min(60.0, self.settings.preview_fps),
-            )
-            inference_interval = 1.0 / max(1.0, self.settings.inference_fps)
             next_inference_at = 0.0
             while not self._stop_event.is_set():
+                QCoreApplication.processEvents()
+                self._apply_emergency_stop()
+                self._apply_pending_settings_if_idle()
                 started = time.perf_counter()
                 capture_started = time.perf_counter()
                 frame = self._capture.grab()
                 self._last_capture_ms = (time.perf_counter() - capture_started) * 1000
+                self._timing_samples["capture_ms"].append(self._last_capture_ms)
                 self._capture_frames += 1
+                self._capture_times.append(time.monotonic())
 
                 target_description = self._input.observe_foreground_window()
                 if target_description:
@@ -402,9 +504,13 @@ class DetectionWorker(QObject):
                 ):
                     try:
                         result = self._inference_future.result()
-                        self._last_inference_ms = result[-1]
+                        self._last_inference_ms = result.inference_ms
+                        self._timing_samples["inference_ms"].append(
+                            self._last_inference_ms
+                        )
                         self._inference_frames += 1
-                        self._apply_detection_result(result[:-1], now)
+                        self._inference_times.append(now)
+                        self._apply_detection_result(result, now)
                     except Exception as exc:
                         self._log(
                             "error",
@@ -413,17 +519,26 @@ class DetectionWorker(QObject):
                         )
                     finally:
                         self._inference_future = None
+                        self._apply_pending_settings_if_idle()
 
-                if (
-                    self._inference_future is None
-                    and now >= next_inference_at
-                ):
+                inference_interval = 1.0 / max(1.0, self.settings.inference_fps)
+                preview_interval = 1.0 / max(
+                    5.0,
+                    min(60.0, self.settings.preview_fps),
+                )
+                if self._inference_future is None and now >= next_inference_at:
                     settings_snapshot = replace(self.settings)
+                    resize_started = time.perf_counter()
                     inference_frame, scale_x, scale_y = (
-                        self._bite.resize_for_inference(frame)
+                        self._bite.resize_for_inference(
+                            frame,
+                            max_width=settings_snapshot.yolo_imgsz,
+                        )
                         if self._bite is not None
                         else (frame, 1.0, 1.0)
                     )
+                    self._last_resize_ms = (time.perf_counter() - resize_started) * 1000
+                    self._timing_samples["resize_ms"].append(self._last_resize_ms)
                     feed_x1, feed_y1, feed_x2, feed_y2 = (
                         self._feed_roi_bounds(frame)
                     )
@@ -434,18 +549,33 @@ class DetectionWorker(QObject):
                         scale_x,
                         scale_y,
                         settings_snapshot,
+                        time.monotonic(),
                     )
                     next_inference_at = now + inference_interval
+                elif self._inference_future is not None and now >= next_inference_at:
+                    self._inference_skipped += 1
+                    next_inference_at = now + inference_interval
 
-                annotated = self._annotate(
-                    frame,
-                    self._latest_boxes,
-                    self._latest_feed_label,
-                )
-                self.frame_ready.emit(self._to_qimage(annotated))
+                if now >= self._next_preview_at:
+                    preview_started = time.perf_counter()
+                    annotated = self._annotate(
+                        frame,
+                        self._latest_boxes,
+                        self._latest_feed_label,
+                    )
+                    self._last_preview_ms = (time.perf_counter() - preview_started) * 1000
+                    qimage_started = time.perf_counter()
+                    image = self._to_qimage(annotated)
+                    self._last_qimage_ms = (time.perf_counter() - qimage_started) * 1000
+                    self._timing_samples["preview_ms"].append(self._last_preview_ms)
+                    self._timing_samples["qimage_ms"].append(self._last_qimage_ms)
+                    self.frame_ready.emit(image)
+                    self._preview_times.append(now)
+                    self._next_preview_at = now + preview_interval
                 self._emit_metrics(frame)
                 elapsed = time.perf_counter() - started
-                time.sleep(max(0.0, preview_interval - elapsed))
+                loop_interval = min(inference_interval, preview_interval)
+                time.sleep(max(0.0, loop_interval - elapsed))
         except Exception as exc:
             self._set_status("运行错误")
             self._log("error", f"{type(exc).__name__}: {exc}", force=True)
@@ -463,6 +593,10 @@ class DetectionWorker(QObject):
     def request_stop(self) -> None:
         self._stop_event.set()
 
+    def request_emergency_stop(self) -> None:
+        self._emergency_requested.set()
+        self._input.trigger_emergency_stop()
+
     def _detect_frame(
         self,
         inference_frame: np.ndarray,
@@ -470,18 +604,13 @@ class DetectionWorker(QObject):
         box_scale_x: float,
         box_scale_y: float,
         settings: AppSettings,
-    ) -> tuple[
-        list[tuple[int, int, int, int, float]],
-        float,
-        str,
-        float,
-        float,
-        float,
-    ]:
+        captured_at: float,
+    ) -> DetectionResult:
         started = time.perf_counter()
         bite_boxes: list[tuple[int, int, int, int, float]] = []
         bite_confidence = 0.0
         feed_label, zero_score, nonzero_score = "not_found", 0.0, 0.0
+        timing: dict[str, float] = {}
 
         if settings.bite_detection_enabled and self._bite is not None:
             detected_boxes, bite_confidence = self._bite.detect(inference_frame)
@@ -495,36 +624,45 @@ class DetectionWorker(QObject):
                 )
                 for x1, y1, x2, y2, confidence in detected_boxes
             ]
+            timing.update(getattr(self._bite, "last_timing", {}))
         if self._feed is not None:
+            feed_started = time.perf_counter()
             feed_label, zero_score, nonzero_score = self._feed.classify_roi(feed_roi)
+            timing["feed_ms"] = (time.perf_counter() - feed_started) * 1000
         elapsed_ms = (time.perf_counter() - started) * 1000
-        return (
-            bite_boxes,
-            bite_confidence,
-            feed_label,
-            zero_score,
-            nonzero_score,
-            elapsed_ms,
+        timing["total_ms"] = elapsed_ms
+        return DetectionResult(
+            boxes=bite_boxes,
+            bite_confidence=bite_confidence,
+            feed_label=feed_label,
+            zero_score=zero_score,
+            nonzero_score=nonzero_score,
+            inference_ms=elapsed_ms,
+            captured_at=captured_at,
+            timing=timing,
         )
 
     def _apply_detection_result(
         self,
-        result: tuple[
-            list[tuple[int, int, int, int, float]],
-            float,
-            str,
-            float,
-            float,
-        ],
+        result: DetectionResult,
         now: float,
     ) -> None:
-        (
-            bite_boxes,
-            bite_confidence,
-            feed_label,
-            zero_score,
-            nonzero_score,
-        ) = result
+        bite_boxes = result.boxes
+        bite_confidence = result.bite_confidence
+        feed_label = result.feed_label
+        zero_score = result.zero_score
+        nonzero_score = result.nonzero_score
+        self._last_result_age_ms = max(0.0, now - result.captured_at) * 1000
+        self._last_feed_ms = result.timing.get("feed_ms", 0.0)
+        self._timing_samples["feed_ms"].append(self._last_feed_ms)
+        for timing_name in (
+            "letterbox_ms",
+            "tensor_ms",
+            "session_ms",
+            "postprocess_ms",
+        ):
+            if timing_name in result.timing:
+                self._timing_samples[timing_name].append(result.timing[timing_name])
         self._latest_boxes = bite_boxes
         self._latest_feed_label = feed_label
         self._latest_bite_confidence = bite_confidence
@@ -540,26 +678,37 @@ class DetectionWorker(QObject):
             if self._bite_absent_streak >= 3:
                 self._bite_event_handled = False
 
-        if feed_label == "zero":
-            self._zero_streak += 1
-        else:
-            self._zero_streak = 0
-            if self._feed_waiting_confirmation:
-                self._feed_waiting_confirmation = False
-                self._log(
-                    "info",
-                    f"检测到红 0 已消失，体力恢复已确认，"
-                    f"当前={feed_label} zero={zero_score:.3f} "
-                    f"nonzero={nonzero_score:.3f}",
-                    force=True,
-                )
+        feed_decision = self._feed_state.observe(
+            feed_label,
+            now,
+            enabled=self.settings.master_enabled and self.settings.auto_feed_enabled,
+        )
+        if feed_decision.transitioned:
+            self._log(
+                "info",
+                f"检测到体力状态变化，当前={feed_label} "
+                f"zero={zero_score:.3f} nonzero={nonzero_score:.3f}",
+                force=True,
+            )
 
         action_status = "等待"
         if bite_boxes:
             action_status = "检测到上钩"
         elif feed_label == "zero":
             action_status = "检测到红 0"
-        if self.settings.master_enabled and not self.settings.preview_only:
+        stale_result = (
+            self._last_result_age_ms
+            > self.settings.inference_result_max_age_seconds * 1000
+        )
+        if stale_result:
+            self._stale_action_skips += 1
+            action_status = f"结果过期，跳过动作 ({self._last_result_age_ms:.0f} ms)"
+        reel_considered = False
+        if (
+            self.settings.master_enabled
+            and not self.settings.preview_only
+            and not stale_result
+        ):
             if (
                 self.settings.auto_reel_enabled
                 and self._bite_streak >= self.settings.bite_confirm_frames
@@ -567,6 +716,7 @@ class DetectionWorker(QObject):
                 and not self._bite_event_handled
                 and now >= self._next_reel_at
             ):
+                reel_considered = True
                 if self._input.left_click(self.settings.input_method):
                     self._next_reel_at = now + self.settings.reel_cooldown_seconds
                     self._last_action = f"{time.strftime('%H:%M:%S')} 左键收杆"
@@ -587,20 +737,21 @@ class DetectionWorker(QObject):
                         force=True,
                     )
             if (
-                self.settings.auto_feed_enabled
-                and self._zero_streak >= self.settings.feed_confirm_frames
+                not reel_considered
+                and self.settings.auto_feed_enabled
+                and feed_decision.should_send
             ):
                 # 喂食只插入 Z，不读取、释放或恢复用户正在按住的移动键。
                 # 这样不会为了抢占 Z 改变 W/A/S/D 等按键状态。
                 sent = self._input.press_z(self.settings.input_method)
-                self._feed_waiting_confirmation = True
+                self._feed_state.mark_send(now, sent)
                 self._last_action = (
-                    f"{time.strftime('%H:%M:%S')} Z 已发送，等待体力恢复"
+                    f"{time.strftime('%H:%M:%S')} "
+                    + ("Z 已发送，等待体力恢复" if sent else "Z 发送失败")
                 )
-                action_status = "已发送 Z，等待体力恢复"
-                # SendInput 成功只代表系统接收了按键，不代表游戏执行了
-                # 喂食。清掉确认计数，继续观察红 0；仍是红 0 时会再次尝试。
-                self._zero_streak = 0
+                action_status = (
+                    "已发送 Z，等待体力恢复" if sent else "Z 发送失败，等待重试"
+                )
                 if sent:
                     self._log(
                         "info",
@@ -614,6 +765,13 @@ class DetectionWorker(QObject):
                         "error",
                         f"Z 喂食发送失败：{self._input.last_result}",
                         force=False,
+                    )
+                if self._feed_state.state == "PAUSED":
+                    action_status = "喂食已暂停：连续输入失败"
+                    self._log(
+                        "error",
+                        "自动喂食因连续输入失败已暂停，请检查前台窗口和权限",
+                        force=True,
                     )
         elif self.settings.preview_only:
             action_status = f"预览模式：{action_status}"
@@ -633,19 +791,40 @@ class DetectionWorker(QObject):
         )
 
     def _emit_metrics(self, frame: np.ndarray) -> None:
-        now = time.perf_counter()
-        if now - self._last_metrics_at < 0.2:
+        now_perf = time.perf_counter()
+        if now_perf - self._last_metrics_at < 0.2:
             return
-        self._last_metrics_at = now
-        elapsed = max(0.001, now - self._preview_started_at)
+        self._last_metrics_at = now_perf
+        now = time.monotonic()
+        for timestamps in (
+            self._capture_times,
+            self._inference_times,
+            self._preview_times,
+        ):
+            while timestamps and timestamps[0] < now - 2.0:
+                timestamps.popleft()
         self.metrics_ready.emit(
             {
                 "resolution": f"{frame.shape[1]} × {frame.shape[0]}",
                 "capture_backend": self._capture.backend_name if self._capture else "未知",
-                "preview_fps": self._capture_frames / elapsed,
-                "inference_fps": self._inference_frames / elapsed,
+                "preview_fps": self._recent_fps(self._preview_times, now),
+                "capture_fps": self._recent_fps(self._capture_times, now),
+                "inference_fps": self._recent_fps(self._inference_times, now),
                 "capture_ms": self._last_capture_ms,
                 "inference_ms": self._last_inference_ms,
+                "capture_stats": self._timing_stats("capture_ms"),
+                "resize_stats": self._timing_stats("resize_ms"),
+                "feed_stats": self._timing_stats("feed_ms"),
+                "inference_stats": self._timing_stats("inference_ms"),
+                "letterbox_stats": self._timing_stats("letterbox_ms"),
+                "tensor_stats": self._timing_stats("tensor_ms"),
+                "session_stats": self._timing_stats("session_ms"),
+                "postprocess_stats": self._timing_stats("postprocess_ms"),
+                "preview_stats": self._timing_stats("preview_ms"),
+                "qimage_stats": self._timing_stats("qimage_ms"),
+                "result_age_ms": self._last_result_age_ms,
+                "inference_skipped": self._inference_skipped,
+                "stale_action_skips": self._stale_action_skips,
                 "bite_confidence": self._latest_bite_confidence,
                 "bite_streak": self._bite_streak,
                 "feed_label": self._latest_feed_label,
@@ -656,9 +835,31 @@ class DetectionWorker(QObject):
                 "preview_only": self.settings.preview_only,
                 "target_window": self._input.target_description,
                 "target_privilege": self._input.target_privilege,
+                "target_foreground": self._input.target_is_foreground,
                 "input_result": self._input.last_result,
+                "feed_state": self._feed_state.state,
+                "onnx_input": getattr(self._bite, "input_shape", ()),
+                "onnx_device": getattr(self._bite, "device", "未知"),
             }
         )
+
+    @staticmethod
+    def _recent_fps(timestamps: deque[float], now: float) -> float:
+        if len(timestamps) < 2:
+            return float(len(timestamps))
+        elapsed = max(0.001, now - timestamps[0])
+        return min(999.0, len(timestamps) / elapsed)
+
+    def _timing_stats(self, name: str) -> dict[str, float]:
+        values = sorted(self._timing_samples[name])
+        if not values:
+            return {"last": 0.0, "avg": 0.0, "p50": 0.0, "p95": 0.0}
+        return {
+            "last": values[-1],
+            "avg": sum(values) / len(values),
+            "p50": values[(len(values) - 1) * 50 // 100],
+            "p95": values[(len(values) - 1) * 95 // 100],
+        }
 
     def _annotate(
         self,
@@ -761,6 +962,7 @@ class WorkerController(QObject):
     settings_changed = Signal(object)
     stop_requested = Signal()
     emergency_requested = Signal()
+    input_test_requested = Signal(str)
 
     def __init__(self, paths: AppPaths, settings: AppSettings) -> None:
         super().__init__()
@@ -768,6 +970,18 @@ class WorkerController(QObject):
         self.thread = QThread()
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
+        self.settings_changed.connect(
+            self.worker.apply_settings,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.emergency_requested.connect(
+            self.worker._apply_emergency_stop,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self.input_test_requested.connect(
+            self.worker.test_input,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self.worker.finished.connect(self.thread.quit)
         self.thread.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
@@ -780,10 +994,11 @@ class WorkerController(QObject):
         self.worker.request_stop()
 
     def emergency_stop(self) -> None:
-        self.worker.emergency_stop_now()
+        self.worker.request_emergency_stop()
+        self.emergency_requested.emit()
 
-    def test_input(self, action: str) -> tuple[bool, str]:
-        return self.worker.test_input(action)
+    def test_input(self, action: str) -> None:
+        self.input_test_requested.emit(action)
 
     def update_settings(self, settings: AppSettings) -> None:
-        self.worker.apply_settings(replace(settings))
+        self.settings_changed.emit(replace(settings))
