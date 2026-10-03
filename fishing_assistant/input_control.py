@@ -5,9 +5,16 @@ import os
 import threading
 import time
 from ctypes import wintypes
+from dataclasses import dataclass, replace
 
 
 ULONG_PTR = ctypes.c_size_t
+
+
+def _hwnd_value(hwnd: wintypes.HWND | int | None) -> int:
+    if isinstance(hwnd, int):
+        return hwnd
+    return int(getattr(hwnd, "value", 0) or 0)
 
 
 class _Point(ctypes.Structure):
@@ -55,6 +62,28 @@ class _Input(ctypes.Structure):
 
 class _TokenElevation(ctypes.Structure):
     _fields_ = (("TokenIsElevated", wintypes.DWORD),)
+
+
+@dataclass(frozen=True)
+class TargetWindowInfo:
+    hwnd: int = 0
+    pid: int = 0
+    process_name: str = ""
+    title: str = ""
+    client_rect: tuple[int, int, int, int] | None = None
+    is_minimized: bool = False
+    is_foreground: bool = False
+    privilege: str = "未检测"
+    valid: bool = False
+
+    @property
+    def description(self) -> str:
+        if not self.hwnd:
+            return "未绑定"
+        return (
+            f"{self.process_name or '<未知进程>'} hwnd={self.hwnd} "
+            f"pid={self.pid} title={self.title or '<无标题>'!r}"
+        )
 
 
 class WindowsInputController:
@@ -111,6 +140,8 @@ class WindowsInputController:
         self._target_privilege = "未检测"
         self._target_process_name = ""
         self._next_target_probe_at = 0.0
+        self._target_info = TargetWindowInfo()
+        self._target_probe_interval = 0.35
         self.last_result = "未执行"
 
     @staticmethod
@@ -135,6 +166,8 @@ class WindowsInputController:
         user32.IsWindow.restype = wintypes.BOOL
         user32.IsWindowVisible.argtypes = (wintypes.HWND,)
         user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.IsIconic.argtypes = (wintypes.HWND,)
+        user32.IsIconic.restype = wintypes.BOOL
         user32.GetWindowTextW.argtypes = (
             wintypes.HWND,
             wintypes.LPWSTR,
@@ -344,7 +377,7 @@ class WindowsInputController:
         title = cls._window_text(hwnd) or "<无标题>"
         process_name = cls._process_name(pid.value) or "<未知进程>"
         return (
-            f"{process_name} hwnd={int(hwnd)} "
+            f"{process_name} hwnd={_hwnd_value(hwnd)} "
             f"pid={pid.value} title={title!r}"
         )
 
@@ -401,43 +434,104 @@ class WindowsInputController:
         user32 = self._user32()
         return bool(
             self._target_hwnd
+            and user32.IsWindow(self._target_hwnd)
             and user32.GetForegroundWindow() == self._target_hwnd
-            and self._is_target_window(self._target_hwnd)
         )
 
-    def observe_foreground_window(self) -> str | None:
-        """Bind a visible top-level window belonging to PetitPlanet.exe."""
-        user32 = self._user32()
-        if self._target_hwnd and self._is_target_window(self._target_hwnd):
+    @property
+    def target_window_info(self) -> TargetWindowInfo:
+        return self.refresh_target()
+
+    def set_probe_interval(self, seconds: float) -> None:
+        self._target_probe_interval = max(0.25, min(2.0, float(seconds)))
+
+    @classmethod
+    def _client_rect_screen(
+        cls,
+        hwnd: wintypes.HWND,
+    ) -> tuple[int, int, int, int] | None:
+        user32 = cls._user32()
+        rect = _Rect()
+        if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
             return None
+        origin = _Point(0, 0)
+        if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
+            return None
+        right = origin.x + int(rect.right)
+        bottom = origin.y + int(rect.bottom)
+        if right <= origin.x or bottom <= origin.y:
+            return None
+        return origin.x, origin.y, right, bottom
+
+    def _clear_target(self, message: str) -> TargetWindowInfo:
         self._target_hwnd = wintypes.HWND(0)
         self._target_description = "未绑定"
         self._target_privilege = "未检测"
         self._target_process_name = ""
+        self._target_info = TargetWindowInfo()
+        self.last_result = message
+        return self._target_info
+
+    def refresh_target(self, force: bool = False) -> TargetWindowInfo:
+        """Refresh the cached target window at a low frequency.
+
+        The foreground check stays cheap and can be performed every loop.
+        Process enumeration and privilege inspection are throttled.
+        """
+        user32 = self._user32()
         now = time.monotonic()
-        if now < self._next_target_probe_at:
-            return None
-        self._next_target_probe_at = now + 0.25
-        hwnd = self._find_target_window()
+        if not force and now < self._next_target_probe_at:
+            if self._target_info.valid:
+                self._target_info = replace(
+                    self._target_info,
+                    is_foreground=(
+                        user32.GetForegroundWindow() == self._target_hwnd
+                    ),
+                )
+            return self._target_info
+        self._next_target_probe_at = now + self._target_probe_interval
+
+        hwnd = self._target_hwnd
+        if not hwnd or not self._is_target_window(hwnd):
+            hwnd = self._find_target_window()
         if not hwnd:
-            self.last_result = "未找到 PetitPlanet.exe 可见窗口"
-            return None
+            return self._clear_target("未找到 PetitPlanet.exe 可见窗口")
+
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if pid.value == os.getpid():
-            return None
         process_name = self._process_name(pid.value)
         if process_name not in self.TARGET_PROCESS_NAMES:
-            self.last_result = (
-                f"前台进程 {process_name or '未知'} 不是 "
-                f"PetitPlanet.exe，已拒绝绑定"
+            return self._clear_target(
+                f"前台进程 {process_name or '未知'} 不是 PetitPlanet.exe，已拒绝绑定"
             )
-            return None
+
+        title = self._window_text(hwnd)
+        privilege = self._privilege_description(pid.value)
+        client_rect = self._client_rect_screen(hwnd)
+        info = TargetWindowInfo(
+            hwnd=_hwnd_value(hwnd),
+            pid=int(pid.value),
+            process_name=process_name,
+            title=title,
+            client_rect=client_rect,
+            is_minimized=bool(user32.IsIconic(hwnd)),
+            is_foreground=user32.GetForegroundWindow() == hwnd,
+            privilege=privilege,
+            valid=True,
+        )
         self._target_hwnd = hwnd
-        self._target_description = self.describe_window(hwnd)
-        self._target_privilege = self._privilege_description(pid.value)
+        self._target_description = info.description
+        self._target_privilege = privilege
         self._target_process_name = process_name
-        return self._target_description
+        self._target_info = info
+        return info
+
+    def observe_foreground_window(self) -> str | None:
+        """Bind a visible top-level window belonging to PetitPlanet.exe."""
+        previous = (_hwnd_value(self._target_hwnd), self._target_description)
+        info = self.refresh_target()
+        current = (info.hwnd, info.description)
+        return info.description if info.valid and current != previous else None
 
     def clear_emergency_stop(self) -> None:
         self._emergency_stop.clear()
@@ -450,14 +544,14 @@ class WindowsInputController:
         return self._emergency_stop.is_set()
 
     def _resolve_target(self):
-        self.observe_foreground_window()
+        info = self.refresh_target(force=True)
         user32 = self._user32()
         if (
-            self._target_hwnd
-            and self._is_target_window(self._target_hwnd)
-            and user32.GetForegroundWindow() == self._target_hwnd
+            info.valid
+            and info.hwnd
+            and user32.GetForegroundWindow() == info.hwnd
         ):
-            return self._target_hwnd
+            return wintypes.HWND(info.hwnd)
         self.last_result = "目标游戏窗口未在前台，已拒绝发送"
         foreground = user32.GetForegroundWindow()
         if foreground:

@@ -9,6 +9,10 @@ from pathlib import Path
 
 import cv2
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from fishing_assistant.onnx_detector import OnnxBiteDetector
 
 
@@ -24,6 +28,7 @@ def main() -> int:
         choices=("cuda", "directml", "cpu"),
         default="cuda",
     )
+    parser.add_argument("--device-id", type=int, default=0)
     args = parser.parse_args()
 
     from ultralytics import YOLO
@@ -45,6 +50,7 @@ def main() -> int:
         use_cuda=torch_device != "cpu",
         dll_search_paths=(torchlib,),
         execution_provider=args.provider,
+        device_id=max(0, args.device_id),
     )
     print(onnx.load())
 

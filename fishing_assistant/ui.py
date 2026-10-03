@@ -243,12 +243,16 @@ class MainWindow(QMainWindow):
         self.auto_reel = QCheckBox("自动收杆（左键）")
         self.auto_feed = QCheckBox("自动喂食（Z）")
         self.preview_only = QCheckBox("预览 / 仅识别模式")
+        self.preview_enabled = QCheckBox("显示实时预览")
+        self.pause_when_inactive = QCheckBox("游戏非前台时暂停采集")
         for checkbox in (
             self.master,
             self.bite_detection,
             self.auto_reel,
             self.auto_feed,
             self.preview_only,
+            self.preview_enabled,
+            self.pause_when_inactive,
         ):
             checkbox.stateChanged.connect(self._settings_changed)
             switches_layout.addWidget(checkbox)
@@ -325,6 +329,21 @@ class MainWindow(QMainWindow):
         self.preview_fps = QDoubleSpinBox()
         self.preview_fps.setRange(5, 30)
         self.preview_fps.setSingleStep(1)
+        self.capture_fps = QDoubleSpinBox()
+        self.capture_fps.setRange(5, 60)
+        self.capture_fps.setSingleStep(5)
+        self.capture_fps.setDecimals(0)
+        self.capture_buffer = QSpinBox()
+        self.capture_buffer.setRange(1, 8)
+        self.capture_source = QComboBox()
+        self.capture_source.addItem("游戏窗口客户区（推荐）", "game_window")
+        self.capture_source.addItem("指定显示器", "monitor")
+        self.opencv_threads = QSpinBox()
+        self.opencv_threads.setRange(1, 8)
+        self.capture_device_index = QSpinBox()
+        self.capture_device_index.setRange(0, 16)
+        self.onnx_device_id = QSpinBox()
+        self.onnx_device_id.setRange(0, 16)
         self.yolo_imgsz = QSpinBox()
         self.yolo_imgsz.setRange(320, 1280)
         self.yolo_imgsz.setSingleStep(32)
@@ -351,6 +370,12 @@ class MainWindow(QMainWindow):
         form.addRow("动作结果最大年龄", self.result_max_age)
         form.addRow("推理频率 FPS", self.inference_fps)
         form.addRow("预览频率 FPS", self.preview_fps)
+        form.addRow("采集频率 FPS", self.capture_fps)
+        form.addRow("采集缓冲帧数", self.capture_buffer)
+        form.addRow("采集来源", self.capture_source)
+        form.addRow("OpenCV 线程数", self.opencv_threads)
+        form.addRow("DXcam 设备编号", self.capture_device_index)
+        form.addRow("ONNX 设备编号", self.onnx_device_id)
         form.addRow("模型输入尺寸", self.yolo_imgsz)
         form.addRow("收杆冷却", self.reel_cooldown)
         form.addRow("输入方式", self.input_method)
@@ -367,6 +392,11 @@ class MainWindow(QMainWindow):
             self.result_max_age,
             self.inference_fps,
             self.preview_fps,
+            self.capture_fps,
+            self.capture_buffer,
+            self.opencv_threads,
+            self.capture_device_index,
+            self.onnx_device_id,
             self.yolo_imgsz,
             self.reel_cooldown,
         ):
@@ -396,6 +426,7 @@ class MainWindow(QMainWindow):
         diagnostics_layout = QVBoxLayout(diagnostics)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(1000)
         self.log_view.setMinimumHeight(180)
         diagnostics_layout.addWidget(self.log_view)
         right.addWidget(diagnostics)
@@ -421,6 +452,8 @@ class MainWindow(QMainWindow):
         self.auto_reel.setChecked(self.settings.auto_reel_enabled)
         self.auto_feed.setChecked(self.settings.auto_feed_enabled)
         self.preview_only.setChecked(self.settings.preview_only)
+        self.preview_enabled.setChecked(self.settings.preview_enabled)
+        self.pause_when_inactive.setChecked(self.settings.pause_when_inactive)
         self.confidence.setValue(self.settings.confidence)
         self.bite_action_confidence.setValue(self.settings.bite_action_confidence)
         self.bite_confirm.setValue(self.settings.bite_confirm_frames)
@@ -431,6 +464,13 @@ class MainWindow(QMainWindow):
         self.result_max_age.setValue(self.settings.inference_result_max_age_seconds)
         self.inference_fps.setValue(self.settings.inference_fps)
         self.preview_fps.setValue(self.settings.preview_fps)
+        self.capture_fps.setValue(self.settings.capture_fps)
+        self.capture_buffer.setValue(self.settings.capture_buffer)
+        capture_index = self.capture_source.findData(self.settings.capture_source)
+        self.capture_source.setCurrentIndex(max(0, capture_index))
+        self.opencv_threads.setValue(self.settings.opencv_threads)
+        self.capture_device_index.setValue(self.settings.capture_device_index)
+        self.onnx_device_id.setValue(self.settings.onnx_device_id)
         self.yolo_imgsz.setValue(self.settings.yolo_imgsz)
         self.reel_cooldown.setValue(self.settings.reel_cooldown_seconds)
         input_index = self.input_method.findData(self.settings.input_method)
@@ -447,6 +487,8 @@ class MainWindow(QMainWindow):
             auto_reel_enabled=self.auto_reel.isChecked(),
             auto_feed_enabled=self.auto_feed.isChecked(),
             preview_only=self.preview_only.isChecked(),
+            preview_enabled=self.preview_enabled.isChecked(),
+            pause_when_inactive=self.pause_when_inactive.isChecked(),
             confidence=self.confidence.value(),
             bite_action_confidence=self.bite_action_confidence.value(),
             bite_confirm_frames=self.bite_confirm.value(),
@@ -460,6 +502,12 @@ class MainWindow(QMainWindow):
             inference_result_max_age_seconds=self.result_max_age.value(),
             inference_fps=self.inference_fps.value(),
             preview_fps=self.preview_fps.value(),
+            capture_fps=self.capture_fps.value(),
+            capture_buffer=self.capture_buffer.value(),
+            capture_source=str(self.capture_source.currentData()),
+            opencv_threads=self.opencv_threads.value(),
+            capture_device_index=self.capture_device_index.value(),
+            onnx_device_id=self.onnx_device_id.value(),
             yolo_imgsz=self.yolo_imgsz.value(),
             reel_cooldown_seconds=self.reel_cooldown.value(),
             input_method=str(self.input_method.currentData()),
@@ -579,6 +627,8 @@ class MainWindow(QMainWindow):
             f'推理 p95 {metrics["inference_stats"]["p95"]:.0f} ms / '
             f'会话 p95 {metrics["session_stats"]["p95"]:.0f} ms / '
             f'{metrics["onnx_device"]} input={metrics["onnx_input"]} / '
+            f'{metrics["activity_state"]} / '
+            f'{metrics["capture_source"]} / '
             f'{metrics["capture_backend"]}'
         )
         self.target_value.setText(

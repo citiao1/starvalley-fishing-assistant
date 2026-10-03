@@ -4,6 +4,8 @@
   "auto_reel_enabled": false,
   "auto_feed_enabled": false,
   "preview_only": true,
+  "preview_enabled": true,
+  "pause_when_inactive": true,
   "confidence": 0.05,
   "bite_action_confidence": 0.15,
   "bite_confirm_frames": 1,
@@ -15,10 +17,17 @@
   "inference_result_max_age_seconds": 0.3,
   "inference_fps": 25.0,
   "preview_fps": 12.0,
+  "capture_fps": 30.0,
+  "capture_buffer": 2,
+  "capture_source": "game_window",
+  "window_probe_interval_seconds": 0.35,
+  "opencv_threads": 1,
   "yolo_imgsz": 960,
   "use_cuda": true,
   "input_method": "sendinput_scan",
   "monitor_index": 0,
-  "inference_backend": "pytorch",
-  "onnx_provider": "cuda"
+  "capture_device_index": 0,
+  "onnx_device_id": 1,
+  "inference_backend": "onnx",
+  "onnx_provider": "directml"
 }
