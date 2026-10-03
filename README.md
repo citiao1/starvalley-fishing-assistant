@@ -10,9 +10,9 @@ Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime DirectML 进行 GPU
 
 直接下载：[starvalley-fishing-assistant-onnx-directml-optimized-20261003.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.0-optimized-directml/starvalley-fishing-assistant-onnx-directml-optimized-20261003.zip)
 
-优化预发布版（窗口采集与 DirectML 设备优化）：[v1.1.1 优化预发布版](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.1-optimized-window-capture)
+优化预发布版（窗口采集与 DirectML 设备优化）：[v1.1.2 输入修复版](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.2-input-fix)
 
-预发布包：[starvalley-fishing-assistant-onnx-directml-optimized-20261003.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.1-optimized-window-capture/starvalley-fishing-assistant-onnx-directml-optimized-20261003.zip)
+预发布包：[starvalley-fishing-assistant-onnx-directml-input-fix-20261003.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.2-input-fix/starvalley-fishing-assistant-onnx-directml-input-fix-20261003.zip)
 
 训练集备份：[backup-dataset-final-2026-10-02.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.0.0/backup-dataset-final-2026-10-02.zip)
 
@@ -79,6 +79,7 @@ Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime DirectML 进行 GPU
 - 游戏非前台或最小化时，默认只保留低频窗口探测，不执行 YOLO、红色数字识别或自动输入。
 - 自动输入只在游戏窗口仍为前台窗口时发送，不会主动抢回焦点。
 - 结果超过配置的最大年龄时只更新识别显示，不触发收杆或喂食。
+- 输入安全校验统一按 HWND 数值比较，避免 ctypes 句柄对象和整数句柄类型不同导致误报“目标未在前台”。
 
 ## 从源码运行
 
