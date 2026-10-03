@@ -18,7 +18,7 @@ from PySide6.QtGui import QImage
 from .config import AppPaths, AppSettings
 from .feed_detector import FeedZeroDetector, scaled_roi
 from .feed_state import FeedStateMachine
-from .input_control import WindowsInputController
+from .input_control import TargetWindowInfo, WindowsInputController
 from .onnx_detector import OnnxBiteDetector
 
 
@@ -32,6 +32,12 @@ class DetectionResult:
     inference_ms: float
     captured_at: float
     timing: dict[str, float]
+
+
+GAME_ACTIVE = "GAME_ACTIVE"
+GAME_INACTIVE = "GAME_INACTIVE"
+GAME_MINIMIZED = "GAME_MINIMIZED"
+WINDOW_INVALID = "WINDOW_INVALID"
 
 
 class BiteDetector:
@@ -129,11 +135,33 @@ class BiteDetector:
 
 
 class ScreenCapture:
-    def __init__(self, monitor_index: int) -> None:
+    def __init__(
+        self,
+        monitor_index: int,
+        input_controller: WindowsInputController,
+        capture_source: str = "game_window",
+        capture_fps: float = 30.0,
+        capture_buffer: int = 2,
+        capture_device_index: int = 0,
+    ) -> None:
         self.monitor_index = monitor_index
+        self.input_controller = input_controller
+        self.capture_source = (
+            capture_source if capture_source in {"game_window", "monitor"} else "game_window"
+        )
+        self.capture_fps = max(5, min(60, round(capture_fps)))
+        self.capture_buffer = max(1, min(8, int(capture_buffer)))
+        self.capture_device_index = max(0, int(capture_device_index))
         self._mss = None
         self._dxcam = None
+        self._monitors: list[dict[str, int]] = []
         self.monitor: dict[str, int] | None = None
+        self._mss_region: dict[str, int] | None = None
+        self._screen_region: tuple[int, int, int, int] | None = None
+        self._region_key: tuple[object, ...] | None = None
+        self._region_kind = "monitor"
+        self._window_hwnd = 0
+        self._primary_monitor_index = 1
         self.backend_name = "未打开"
         self.backend_error = ""
 
@@ -141,71 +169,217 @@ class ScreenCapture:
         import mss
 
         self._mss = mss.MSS()
-        monitors = self._mss.monitors
-        primary = next(
+        self._monitors = list(self._mss.monitors)
+        self._primary_monitor_index = next(
             (
                 index
-                for index, monitor in enumerate(monitors)
+                for index, monitor in enumerate(self._monitors)
                 if index > 0 and monitor.get("is_primary")
             ),
             1,
         )
         if self.monitor_index <= 0:
-            self.monitor_index = primary
-        elif len(monitors) <= self.monitor_index:
-            self.monitor_index = 1
-        self.monitor = monitors[self.monitor_index]
-        self.backend_name = "mss"
-        self.backend_error = ""
-
-        try:
-            import dxcam
-
-            output_index = (
-                None
-                if self.monitor_index == primary
-                else max(0, self.monitor_index - 1)
+            self.monitor_index = self._primary_monitor_index
+        elif len(self._monitors) <= self.monitor_index:
+            self.monitor_index = self._primary_monitor_index
+        self._apply_monitor_region(self.monitor_index, restart=False)
+        self._start_dxcam()
+        if self.capture_source == "game_window":
+            self.update_window(
+                self.input_controller.refresh_target(force=True),
             )
-            width = int(self.monitor["width"])
-            height = int(self.monitor["height"])
+
+    def _output_index(self, monitor_index: int) -> int | None:
+        return (
+            None
+            if monitor_index == self._primary_monitor_index
+            else max(0, monitor_index - 1)
+        )
+
+    def _apply_monitor_region(self, monitor_index: int, restart: bool) -> bool:
+        if not self._monitors or not (0 < monitor_index < len(self._monitors)):
+            return False
+        monitor = self._monitors[monitor_index]
+        left = int(monitor["left"])
+        top = int(monitor["top"])
+        right = left + int(monitor["width"])
+        bottom = top + int(monitor["height"])
+        self.monitor_index = monitor_index
+        self.monitor = monitor
+        self._set_region(
+            "monitor",
+            (left, top, right, bottom),
+            monitor_index,
+            0,
+            restart=restart,
+        )
+        return True
+
+    def _set_region(
+        self,
+        kind: str,
+        screen_region: tuple[int, int, int, int],
+        monitor_index: int,
+        hwnd: int,
+        restart: bool,
+    ) -> bool:
+        left, top, right, bottom = screen_region
+        if right - left < 16 or bottom - top < 16:
+            return False
+        key = (kind, hwnd, monitor_index, left, top, right, bottom)
+        changed = key != self._region_key
+        self._region_key = key
+        self._region_kind = kind
+        self._window_hwnd = hwnd
+        self.monitor_index = monitor_index
+        self.monitor = self._monitors[monitor_index]
+        self._screen_region = screen_region
+        self._mss_region = {
+            "left": left,
+            "top": top,
+            "width": right - left,
+            "height": bottom - top,
+        }
+        if changed and restart and self._dxcam is not None:
+            self._start_dxcam()
+        return changed
+
+    def _start_dxcam(self) -> None:
+        import dxcam
+
+        if self._dxcam is not None:
+            try:
+                self._dxcam.stop()
+            except Exception:
+                pass
+            try:
+                self._dxcam.release()
+            except Exception:
+                pass
+            self._dxcam = None
+        if self.monitor is None or self._screen_region is None:
+            self.backend_name = "mss fallback"
+            return
+        monitor_left = int(self.monitor["left"])
+        monitor_top = int(self.monitor["top"])
+        left, top, right, bottom = self._screen_region
+        local_region = (
+            left - monitor_left,
+            top - monitor_top,
+            right - monitor_left,
+            bottom - monitor_top,
+        )
+        output_index = self._output_index(self.monitor_index)
+        try:
             self._dxcam = dxcam.create(
+                device_idx=self.capture_device_index,
                 output_idx=output_index,
-                region=(0, 0, width, height),
+                region=local_region,
                 output_color="BGR",
+                max_buffer_len=self.capture_buffer,
                 processor_backend="cv2",
             )
             self._dxcam.start(
-                region=(0, 0, width, height),
-                target_fps=60,
+                region=local_region,
+                target_fps=self.capture_fps,
                 video_mode=True,
             )
-            self.backend_name = f"dxcam (output {output_index})"
+            self.backend_error = ""
+            self.backend_name = (
+                f"dxcam ({self._region_kind}, device {self.capture_device_index}, "
+                f"output {output_index})"
+            )
         except Exception as exc:
+            self._dxcam = None
             self.backend_error = f"{type(exc).__name__}: {exc}"
-            self.backend_name = "mss fallback"
-            if self._dxcam is not None:
-                try:
-                    self._dxcam.release()
-                except Exception:
-                    pass
-                self._dxcam = None
+            self.backend_name = f"mss fallback ({self._region_kind})"
+
+    def _monitor_for_rect(
+        self,
+        rect: tuple[int, int, int, int],
+    ) -> tuple[int, dict[str, int]] | None:
+        if not self._monitors:
+            return None
+        center_x = (rect[0] + rect[2]) / 2
+        center_y = (rect[1] + rect[3]) / 2
+        candidates = list(enumerate(self._monitors[1:], start=1))
+        def intersection_area(item: tuple[int, dict[str, int]]) -> int:
+            _, monitor = item
+            left = max(rect[0], int(monitor["left"]))
+            top = max(rect[1], int(monitor["top"]))
+            right = min(rect[2], int(monitor["left"]) + int(monitor["width"]))
+            bottom = min(rect[3], int(monitor["top"]) + int(monitor["height"]))
+            return max(0, right - left) * max(0, bottom - top)
+
+        overlapping = [
+            item for item in candidates if intersection_area(item) > 0
+        ]
+        if overlapping:
+            return max(overlapping, key=intersection_area)
+
+        def distance(item: tuple[int, dict[str, int]]) -> float:
+            _, monitor = item
+            mx = int(monitor["left"]) + int(monitor["width"]) / 2
+            my = int(monitor["top"]) + int(monitor["height"]) / 2
+            return (mx - center_x) ** 2 + (my - center_y) ** 2
+
+        return min(candidates, key=distance) if candidates else None
+
+    def update_window(self, info: TargetWindowInfo) -> bool:
+        if self.capture_source != "game_window":
+            return False
+        rect = info.client_rect
+        if (
+            not info.valid
+            or info.is_minimized
+            or rect is None
+            or rect[2] - rect[0] < 16
+            or rect[3] - rect[1] < 16
+        ):
+            if self._region_kind != "monitor":
+                return self._apply_monitor_region(
+                    self._primary_monitor_index,
+                    restart=True,
+                )
+            return False
+        selected = self._monitor_for_rect(rect)
+        if selected is None:
+            return False
+        monitor_index, _ = selected
+        return self._set_region(
+            "game_window",
+            rect,
+            monitor_index,
+            info.hwnd,
+            restart=True,
+        )
 
     def grab(self) -> np.ndarray:
         if self._mss is None or self.monitor is None:
             self.open()
         assert self._mss is not None
-        assert self.monitor is not None
         if self._dxcam is not None:
-            frame = self._dxcam.get_latest_frame()
+            frame = self._dxcam.get_latest_frame(copy=True)
             if frame is not None:
                 return np.asarray(frame, dtype=np.uint8)
-        return np.asarray(self._mss.grab(self.monitor), dtype=np.uint8)[:, :, :3]
+        if self._mss_region is None:
+            raise RuntimeError("屏幕采集区域未初始化")
+        return np.asarray(self._mss.grab(self._mss_region), dtype=np.uint8)[:, :, :3]
 
     @property
     def size(self) -> tuple[int, int]:
-        if self.monitor is None:
+        if self._screen_region is None:
             return 0, 0
-        return int(self.monitor["width"]), int(self.monitor["height"])
+        left, top, right, bottom = self._screen_region
+        return right - left, bottom - top
+
+    @property
+    def region_name(self) -> str:
+        return self._region_kind
+
+    @property
+    def capture_device(self) -> str:
+        return f"dxcam device {self.capture_device_index}"
 
     def close(self) -> None:
         if self._dxcam is not None:
@@ -307,6 +481,8 @@ class DetectionWorker(QObject):
             "qimage_ms": deque(maxlen=256),
         }
         self._next_preview_at = 0.0
+        self._activity_state = WINDOW_INVALID
+        self._last_window_description = ""
 
     @Slot(object)
     def apply_settings(self, settings: AppSettings) -> None:
@@ -332,6 +508,38 @@ class DetectionWorker(QObject):
             )
         previous = self.settings
         self.settings = settings
+        self._input.set_probe_interval(settings.window_probe_interval_seconds)
+        if previous.opencv_threads != settings.opencv_threads:
+            cv2.setNumThreads(max(1, int(settings.opencv_threads)))
+        capture_changed = any(
+            getattr(previous, name) != getattr(settings, name)
+            for name in (
+                "monitor_index",
+                "capture_source",
+                "capture_fps",
+                "capture_buffer",
+                "capture_device_index",
+            )
+        )
+        if capture_changed and self._capture is not None:
+            self._capture.close()
+            self._capture = ScreenCapture(
+                settings.monitor_index,
+                self._input,
+                capture_source=settings.capture_source,
+                capture_fps=settings.capture_fps,
+                capture_buffer=settings.capture_buffer,
+                capture_device_index=settings.capture_device_index,
+            )
+            self._capture.open()
+            self._log(
+                "info",
+                f"屏幕采集配置已更新: {self._capture.backend_name} / "
+                f"source={settings.capture_source} / "
+                f"target_fps={settings.capture_fps} / "
+                f"buffer={settings.capture_buffer}",
+                force=True,
+            )
         self._feed_state.reconfigure(
             settings.feed_confirm_frames,
             settings.feed_min_interval_seconds,
@@ -347,6 +555,7 @@ class DetectionWorker(QObject):
                     settings.use_cuda,
                     settings.yolo_imgsz,
                     settings.onnx_provider,
+                    settings.onnx_device_id,
                 )
             else:
                 changed = self._bite.configure(
@@ -358,6 +567,12 @@ class DetectionWorker(QObject):
                 self._log(
                     "info",
                     f"推理设备已切换为 {self._bite.device}",
+                    force=True,
+                )
+            if isinstance(self._bite, OnnxBiteDetector) and self._bite.last_error:
+                self._log(
+                    "error",
+                    f"推理 session 更新失败，继续使用旧 session：{self._bite.last_error}",
                     force=True,
                 )
 
@@ -409,16 +624,33 @@ class DetectionWorker(QObject):
         for samples in self._timing_samples.values():
             samples.clear()
         self._emergency_requested.clear()
+        cv2.setNumThreads(max(1, int(self.settings.opencv_threads)))
+        self._input.set_probe_interval(self.settings.window_probe_interval_seconds)
         self._executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="fishing-inference",
         )
         try:
             self._input.clear_emergency_stop()
-            self._capture = ScreenCapture(self.settings.monitor_index)
+            self._capture = ScreenCapture(
+                self.settings.monitor_index,
+                self._input,
+                capture_source=self.settings.capture_source,
+                capture_fps=self.settings.capture_fps,
+                capture_buffer=self.settings.capture_buffer,
+                capture_device_index=self.settings.capture_device_index,
+            )
             self._capture.open()
             self._log("info", f"屏幕采集已打开: {self._capture.size}", force=True)
-            self._log("info", f"屏幕采集后端: {self._capture.backend_name}", force=True)
+            self._log(
+                "info",
+                f"屏幕采集后端: {self._capture.backend_name} / "
+                f"source={self.settings.capture_source} / "
+                f"target_fps={self.settings.capture_fps} / "
+                f"buffer={self.settings.capture_buffer} / "
+                f"device={self._capture.capture_device}",
+                force=True,
+            )
             if self._capture.backend_error:
                 self._log(
                     "warning",
@@ -448,6 +680,7 @@ class DetectionWorker(QObject):
                     self.settings.use_cuda,
                     dll_search_paths=dll_search_paths,
                     execution_provider=self.settings.onnx_provider,
+                    device_id=self.settings.onnx_device_id,
                 )
             else:
                 if not self.paths.model_path.exists():
@@ -461,6 +694,12 @@ class DetectionWorker(QObject):
                     self.settings.use_cuda,
                 )
             self._log("info", self._bite.load(), force=True)
+            if isinstance(self._bite, OnnxBiteDetector) and self._bite.last_error:
+                self._log(
+                    "warning",
+                    f"ONNX 设备回退：{self._bite.last_error}，实际使用 {self._bite.device}",
+                    force=True,
+                )
 
             if not self.paths.zero_template_path.exists():
                 raise FileNotFoundError(f"找不到红 0 模板: {self.paths.zero_template_path}")
@@ -481,10 +720,36 @@ class DetectionWorker(QObject):
             self._set_status("预览运行中")
 
             next_inference_at = 0.0
+            next_event_pump_at = 0.0
             while not self._stop_event.is_set():
-                QCoreApplication.processEvents()
+                loop_now = time.monotonic()
+                if loop_now >= next_event_pump_at:
+                    QCoreApplication.processEvents()
+                    next_event_pump_at = loop_now + 0.10
                 self._apply_emergency_stop()
                 self._apply_pending_settings_if_idle()
+                target_info = self._input.refresh_target()
+                self._update_activity_state(target_info)
+                if target_info.description != self._last_window_description:
+                    self._last_window_description = target_info.description
+                    if target_info.valid:
+                        self._log(
+                            "info",
+                            f"已绑定目标窗口：{target_info.description}",
+                            force=True,
+                        )
+                self._capture.update_window(target_info)
+                if (
+                    self.settings.pause_when_inactive
+                    and self._activity_state != GAME_ACTIVE
+                ):
+                    self._emit_metrics(None)
+                    time.sleep(
+                        0.20
+                        if self._activity_state == WINDOW_INVALID
+                        else 0.05
+                    )
+                    continue
                 started = time.perf_counter()
                 capture_started = time.perf_counter()
                 frame = self._capture.grab()
@@ -492,10 +757,6 @@ class DetectionWorker(QObject):
                 self._timing_samples["capture_ms"].append(self._last_capture_ms)
                 self._capture_frames += 1
                 self._capture_times.append(time.monotonic())
-
-                target_description = self._input.observe_foreground_window()
-                if target_description:
-                    self._log("info", f"已绑定目标窗口：{target_description}")
 
                 now = time.monotonic()
                 if (
@@ -556,7 +817,7 @@ class DetectionWorker(QObject):
                     self._inference_skipped += 1
                     next_inference_at = now + inference_interval
 
-                if now >= self._next_preview_at:
+                if self.settings.preview_enabled and now >= self._next_preview_at:
                     preview_started = time.perf_counter()
                     annotated = self._annotate(
                         frame,
@@ -574,7 +835,12 @@ class DetectionWorker(QObject):
                     self._next_preview_at = now + preview_interval
                 self._emit_metrics(frame)
                 elapsed = time.perf_counter() - started
-                loop_interval = min(inference_interval, preview_interval)
+                capture_interval = 1.0 / max(5.0, self.settings.capture_fps)
+                loop_interval = min(
+                    capture_interval,
+                    inference_interval,
+                    preview_interval if self.settings.preview_enabled else capture_interval,
+                )
                 time.sleep(max(0.0, loop_interval - elapsed))
         except Exception as exc:
             self._set_status("运行错误")
@@ -641,6 +907,27 @@ class DetectionWorker(QObject):
             captured_at=captured_at,
             timing=timing,
         )
+
+    def _update_activity_state(self, info: TargetWindowInfo) -> None:
+        if not info.valid:
+            state = WINDOW_INVALID
+        elif info.is_minimized or info.client_rect is None:
+            state = GAME_MINIMIZED
+        elif not info.is_foreground:
+            state = GAME_INACTIVE
+        else:
+            state = GAME_ACTIVE
+        if state == self._activity_state:
+            return
+        self._activity_state = state
+        messages = {
+            GAME_ACTIVE: "游戏窗口已在前台，恢复采集和推理",
+            GAME_INACTIVE: "游戏窗口不在前台，暂停高耗时采集和推理",
+            GAME_MINIMIZED: "游戏窗口已最小化，暂停采集和推理",
+            WINDOW_INVALID: "未找到有效的 PetitPlanet.exe 窗口，暂停采集和推理",
+        }
+        self._set_status(messages[state])
+        self._log("info", f"{state}: {messages[state]}", force=True)
 
     def _apply_detection_result(
         self,
@@ -790,7 +1077,7 @@ class DetectionWorker(QObject):
             min(frame.shape[0], y2),
         )
 
-    def _emit_metrics(self, frame: np.ndarray) -> None:
+    def _emit_metrics(self, frame: np.ndarray | None) -> None:
         now_perf = time.perf_counter()
         if now_perf - self._last_metrics_at < 0.2:
             return
@@ -805,8 +1092,23 @@ class DetectionWorker(QObject):
                 timestamps.popleft()
         self.metrics_ready.emit(
             {
-                "resolution": f"{frame.shape[1]} × {frame.shape[0]}",
+                "resolution": (
+                    f"{frame.shape[1]} × {frame.shape[0]}"
+                    if frame is not None
+                    else (
+                        f"{self._capture.size[0]} × {self._capture.size[1]}"
+                        if self._capture is not None
+                        else "0 × 0"
+                    )
+                ),
                 "capture_backend": self._capture.backend_name if self._capture else "未知",
+                "capture_source": (
+                    self._capture.region_name if self._capture else "未知"
+                ),
+                "capture_device": (
+                    self._capture.capture_device if self._capture else "未知"
+                ),
+                "activity_state": self._activity_state,
                 "preview_fps": self._recent_fps(self._preview_times, now),
                 "capture_fps": self._recent_fps(self._capture_times, now),
                 "inference_fps": self._recent_fps(self._inference_times, now),
@@ -840,6 +1142,7 @@ class DetectionWorker(QObject):
                 "feed_state": self._feed_state.state,
                 "onnx_input": getattr(self._bite, "input_shape", ()),
                 "onnx_device": getattr(self._bite, "device", "未知"),
+                "onnx_device_id": getattr(self._bite, "device_id", 0),
             }
         )
 

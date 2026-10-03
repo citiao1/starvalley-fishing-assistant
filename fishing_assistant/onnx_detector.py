@@ -21,6 +21,7 @@ class OnnxBiteDetector:
         use_cuda: bool,
         dll_search_paths: tuple[Path, ...] = (),
         execution_provider: str = "cuda",
+        device_id: int = 0,
     ) -> None:
         self.model_path = model_path
         self.confidence = confidence
@@ -28,6 +29,7 @@ class OnnxBiteDetector:
         self.use_cuda = use_cuda
         self.dll_search_paths = dll_search_paths
         self.execution_provider = execution_provider
+        self.device_id = max(0, int(device_id))
         self.session: Any = None
         self.input_name = ""
         self.device = "cpu"
@@ -36,16 +38,40 @@ class OnnxBiteDetector:
         self.input_shape: tuple[Any, ...] = ()
         self.output_shapes: list[tuple[Any, ...]] = []
         self.model_sha256 = ""
+        self.last_error = ""
+        self._dll_paths: set[str] = set()
 
     def load(self) -> str:
         if not self.model_path.exists():
             raise FileNotFoundError(f"找不到 ONNX 权重: {self.model_path}")
-        self._open_session()
+        requested_device_id = self.device_id
+        fallback_message = ""
+        try:
+            self._open_session()
+        except Exception as exc:
+            if (
+                self.execution_provider in {"cuda", "directml"}
+                and self.device_id != 0
+            ):
+                fallback_message = (
+                    f"device_id={requested_device_id} 加载失败，尝试 device_id=0："
+                    f"{type(exc).__name__}: {exc}"
+                )
+                self.device_id = 0
+                try:
+                    self._open_session()
+                except Exception:
+                    self.device_id = requested_device_id
+                    raise
+            else:
+                raise
+        self.last_error = fallback_message
         providers = ", ".join(self.session.get_providers())
         self.model_sha256 = _sha256_file(self.model_path)
         return (
             f"ONNX 模型已加载: {self.model_path.name} / "
-            f"device={self.device} / providers={providers} / "
+            f"device={self.device} / device_id={self.device_id} / "
+            f"providers={providers} / "
             f"input={self.input_shape} / sha256={self.model_sha256[:16]}"
         )
 
@@ -54,7 +80,10 @@ class OnnxBiteDetector:
 
         for path in self.dll_search_paths:
             if path.exists() and hasattr(os, "add_dll_directory"):
-                self._dll_handles.append(os.add_dll_directory(str(path)))
+                path_text = str(path)
+                if path_text not in self._dll_paths:
+                    self._dll_handles.append(os.add_dll_directory(path_text))
+                    self._dll_paths.add(path_text)
             os.environ["PATH"] = f"{path}{os.pathsep}{os.environ.get('PATH', '')}"
 
         provider_name = {
@@ -66,29 +95,50 @@ class OnnxBiteDetector:
             "CPUExecutionProvider",
         )
         requested = (
-            [provider_name, "CPUExecutionProvider"]
+            [
+                (
+                    provider_name,
+                    {"device_id": self.device_id},
+                ),
+                "CPUExecutionProvider",
+            ]
             if provider_name != "CPUExecutionProvider"
             else ["CPUExecutionProvider"]
         )
-        self.session = None
-        self.session = ort.InferenceSession(
+        new_session = ort.InferenceSession(
             str(self.model_path),
             providers=requested,
         )
-        input_info = self.session.get_inputs()[0]
-        self.input_name = input_info.name
-        self.input_shape = tuple(input_info.shape)
-        self.output_shapes = [tuple(item.shape) for item in self.session.get_outputs()]
-        active = self.session.get_providers()
+        input_info = new_session.get_inputs()[0]
+        input_name = input_info.name
+        input_shape = tuple(input_info.shape)
+        output_shapes = [tuple(item.shape) for item in new_session.get_outputs()]
+        active = new_session.get_providers()
         active_provider = next(
-            (name for name in requested if name in active),
+            (
+                name
+                for name in (
+                    provider_name,
+                    "CPUExecutionProvider",
+                )
+                if name in active
+            ),
             "CPUExecutionProvider",
         )
-        self.device = {
+        device_name = {
             "CUDAExecutionProvider": "cuda",
             "DmlExecutionProvider": "directml",
             "CPUExecutionProvider": "cpu",
         }[active_provider]
+        old_session = self.session
+        self.session = new_session
+        self.input_name = input_name
+        self.input_shape = input_shape
+        self.output_shapes = output_shapes
+        self.device = f"{device_name}:{self.device_id}" if device_name != "cpu" else "cpu"
+        if old_session is not None:
+            del old_session
+        self.last_error = ""
 
     def configure(
         self,
@@ -96,8 +146,22 @@ class OnnxBiteDetector:
         use_cuda: bool,
         image_size: int,
         execution_provider: str,
+        device_id: int,
     ) -> bool:
-        previous_device = (self.device, self.image_size, self.execution_provider)
+        previous_values = (
+            self.confidence,
+            self.use_cuda,
+            self.image_size,
+            self.execution_provider,
+            self.device_id,
+            self.device,
+        )
+        previous_device = (
+            self.device,
+            self.image_size,
+            self.execution_provider,
+            self.device_id,
+        )
         previous_requested_provider = self.execution_provider
         previous_effective_provider = (
             previous_requested_provider
@@ -108,6 +172,7 @@ class OnnxBiteDetector:
         self.image_size = int(image_size)
         self.use_cuda = use_cuda
         self.execution_provider = execution_provider
+        self.device_id = max(0, int(device_id))
         current_provider = (
             self.execution_provider
             if self.use_cuda or self.execution_provider != "cuda"
@@ -116,9 +181,27 @@ class OnnxBiteDetector:
         if (
             self.session is None
             or current_provider != previous_effective_provider
+            or self.device_id != previous_device[3]
         ):
-            self._open_session()
-        return (self.device, self.image_size, self.execution_provider) != previous_device
+            try:
+                self._open_session()
+            except Exception as exc:
+                (
+                    self.confidence,
+                    self.use_cuda,
+                    self.image_size,
+                    self.execution_provider,
+                    self.device_id,
+                    self.device,
+                ) = previous_values
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                return False
+        return (
+            self.device,
+            self.image_size,
+            self.execution_provider,
+            self.device_id,
+        ) != previous_device
 
     def detect(
         self,
