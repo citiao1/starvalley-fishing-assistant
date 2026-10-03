@@ -17,6 +17,13 @@ def _hwnd_value(hwnd: wintypes.HWND | int | None) -> int:
     return int(getattr(hwnd, "value", 0) or 0)
 
 
+def _same_hwnd(
+    left: wintypes.HWND | int | None,
+    right: wintypes.HWND | int | None,
+) -> bool:
+    return _hwnd_value(left) != 0 and _hwnd_value(left) == _hwnd_value(right)
+
+
 class _Point(ctypes.Structure):
     _fields_ = (("x", wintypes.LONG), ("y", wintypes.LONG))
 
@@ -435,7 +442,7 @@ class WindowsInputController:
         return bool(
             self._target_hwnd
             and user32.IsWindow(self._target_hwnd)
-            and user32.GetForegroundWindow() == self._target_hwnd
+            and _same_hwnd(user32.GetForegroundWindow(), self._target_hwnd)
         )
 
     @property
@@ -484,8 +491,9 @@ class WindowsInputController:
             if self._target_info.valid:
                 self._target_info = replace(
                     self._target_info,
-                    is_foreground=(
-                        user32.GetForegroundWindow() == self._target_hwnd
+                    is_foreground=_same_hwnd(
+                        user32.GetForegroundWindow(),
+                        self._target_hwnd,
                     ),
                 )
             return self._target_info
@@ -515,7 +523,7 @@ class WindowsInputController:
             title=title,
             client_rect=client_rect,
             is_minimized=bool(user32.IsIconic(hwnd)),
-            is_foreground=user32.GetForegroundWindow() == hwnd,
+            is_foreground=_same_hwnd(user32.GetForegroundWindow(), hwnd),
             privilege=privilege,
             valid=True,
         )
@@ -549,7 +557,7 @@ class WindowsInputController:
         if (
             info.valid
             and info.hwnd
-            and user32.GetForegroundWindow() == info.hwnd
+            and _same_hwnd(user32.GetForegroundWindow(), info.hwnd)
         ):
             return wintypes.HWND(info.hwnd)
         self.last_result = "目标游戏窗口未在前台，已拒绝发送"
@@ -672,7 +680,7 @@ class WindowsInputController:
             self.last_result = "没有目标窗口"
             return False
         user32 = self._user32()
-        if user32.GetForegroundWindow() == hwnd:
+        if _same_hwnd(user32.GetForegroundWindow(), hwnd):
             return True
         self.last_result = (
             f"目标未在前台，已拒绝输入 "

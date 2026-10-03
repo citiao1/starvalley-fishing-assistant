@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 
 from fishing_assistant.engine import ScreenCapture
-from fishing_assistant.input_control import TargetWindowInfo
+from ctypes import wintypes
+
+from fishing_assistant.input_control import TargetWindowInfo, _same_hwnd
 from fishing_assistant.onnx_detector import OnnxBiteDetector
 
 
@@ -46,6 +48,11 @@ class CaptureLogicTests(unittest.TestCase):
             info.description,
             "petitplanet.exe hwnd=123 pid=456 title='星布谷地'",
         )
+
+    def test_hwnd_object_and_integer_compare_by_value(self) -> None:
+        self.assertTrue(_same_hwnd(wintypes.HWND(123), 123))
+        self.assertFalse(_same_hwnd(wintypes.HWND(123), 456))
+        self.assertFalse(_same_hwnd(wintypes.HWND(0), 0))
 
 
 class OnnxSessionSafetyTests(unittest.TestCase):
