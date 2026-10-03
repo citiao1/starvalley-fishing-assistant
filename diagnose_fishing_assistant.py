@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import platform
 import sys
@@ -13,9 +14,6 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from fishing_assistant.config import AppPaths  # noqa: E402
-from fishing_assistant.feed_detector import FeedZeroDetector  # noqa: E402
-
-
 def check_import(name: str) -> dict:
     try:
         module = __import__(name)
@@ -33,6 +31,7 @@ def main() -> int:
         "root": str(ROOT),
         "paths": {
             "model": str(paths.model_path),
+            "onnx_model": str(paths.onnx_model_path),
             "zero_template": str(paths.zero_template_path),
             "nonzero_template": str(paths.nonzero_template_path),
             "log": str(paths.log_file),
@@ -44,18 +43,22 @@ def main() -> int:
 
     for name, path in (
         ("model", paths.model_path),
+        ("onnx_model", paths.onnx_model_path),
         ("zero_template", paths.zero_template_path),
         ("nonzero_template", paths.nonzero_template_path),
     ):
         report["files"][name] = {
             "exists": path.exists(),
             "bytes": path.stat().st_size if path.exists() else 0,
+            "sha256": _sha256(path) if path.exists() else "",
         }
 
     for name in ("cv2", "numpy", "torch", "ultralytics", "mss", "PySide6", "PyInstaller"):
         report["imports"][name] = check_import(name)
 
     try:
+        from fishing_assistant.feed_detector import FeedZeroDetector
+
         detector = FeedZeroDetector.from_images(
             paths.zero_template_path,
             paths.nonzero_template_path,
@@ -67,6 +70,27 @@ def main() -> int:
         }
     except Exception as exc:
         report["checks"]["feed_templates"] = {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    try:
+        import onnxruntime as ort
+
+        session = ort.InferenceSession(
+            str(paths.onnx_model_path),
+            providers=["DmlExecutionProvider", "CPUExecutionProvider"],
+        )
+        report["checks"]["onnx_runtime"] = {
+            "ok": True,
+            "available_providers": ort.get_available_providers(),
+            "active_providers": session.get_providers(),
+            "input_name": session.get_inputs()[0].name,
+            "input_shape": session.get_inputs()[0].shape,
+            "output_shapes": [item.shape for item in session.get_outputs()],
+        }
+    except Exception as exc:
+        report["checks"]["onnx_runtime"] = {
             "ok": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -125,6 +149,14 @@ def main() -> int:
     print(json.dumps(report, ensure_ascii=False, indent=2))
     print(f"\n诊断报告已写入: {output}")
     return 0 if all(item.get("ok", False) for item in report["checks"].values()) else 1
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 if __name__ == "__main__":

@@ -7,20 +7,27 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$python = Join-Path $root "tools\python312_portable\python.exe"
-$deps = if ($Provider -eq "directml") {
-    "D:\Temp\starvalley_ort_dml_deps"
+$pythonCandidates = @(
+    (Join-Path $root "tools\python312_portable\python.exe"),
+    (Join-Path $root "build\python312-venv\Scripts\python.exe"),
+    (Join-Path $root "build\python-env\bin\python.exe")
+)
+$python = $pythonCandidates | Where-Object {
+    Test-Path -LiteralPath $_
+} | Select-Object -First 1
+$depsCandidates = if ($Provider -eq "directml") {
+    @("D:\Temp\starvalley_ort_dml_deps")
 } else {
-    "D:\Temp\starvalley_ort120_deps"
+    @("D:\Temp\starvalley_ort120_deps")
 }
+$deps = $depsCandidates | Where-Object {
+    Test-Path -LiteralPath $_
+} | Select-Object -First 1
 $dist = Join-Path $root "dist"
 $name = "星布谷地钓鱼助手_ONNX_$Provider"
 
-if (-not (Test-Path -LiteralPath $python)) {
-    throw "Portable Python not found: $python"
-}
-if (-not (Test-Path -LiteralPath $deps)) {
-    throw "ONNX Runtime dependency directory not found: $deps"
+if ([string]::IsNullOrWhiteSpace($python)) {
+    throw "No usable 64-bit Python environment found. Checked: $($pythonCandidates -join ', ')"
 }
 if (-not (Test-Path -LiteralPath (Join-Path $root "models\best.onnx"))) {
     throw "ONNX model not found"
@@ -65,6 +72,12 @@ $pyinstallerArgs = @(
     "--exclude-module", "scipy",
     "run_app_onnx.py"
 )
+if (
+    -not [string]::IsNullOrWhiteSpace($deps) `
+    -and $python -notlike "*\build\python312-venv\Scripts\python.exe"
+) {
+    $pyinstallerArgs = @("--paths", $deps) + $pyinstallerArgs
+}
 
 $originalPath = $env:PATH
 try {

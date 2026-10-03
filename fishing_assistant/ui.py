@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import threading
 import time
 from dataclasses import replace
 
@@ -61,6 +62,33 @@ class StatusValue(QLabel):
         self.setWordWrap(True)
 
 
+class FrameMailbox(QObject):
+    """Coalesce preview frames so a slow UI never consumes an old queue."""
+
+    frame_available = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self._latest = None
+        self._notification_pending = False
+
+    def push(self, image) -> None:
+        with self._lock:
+            self._latest = image
+            if self._notification_pending:
+                return
+            self._notification_pending = True
+        self.frame_available.emit()
+
+    def take(self):
+        with self._lock:
+            image = self._latest
+            self._latest = None
+            self._notification_pending = False
+            return image
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -76,6 +104,7 @@ class MainWindow(QMainWindow):
         self._display_fps_started = time.perf_counter()
         self._initializing = True
         self.settings_dialog: QDialog | None = None
+        self.frame_mailbox = FrameMailbox()
 
         self.setWindowTitle("星布谷地 · 自动钓鱼助手")
         if self.paths.icon_path.exists():
@@ -83,6 +112,7 @@ class MainWindow(QMainWindow):
         self.resize(1440, 900)
         self.setMinimumSize(1120, 720)
         self._build_ui()
+        self.frame_mailbox.frame_available.connect(self._on_frame)
         self._apply_settings_to_controls()
         self._initializing = False
         self._start_hotkey_watcher()
@@ -255,7 +285,7 @@ class MainWindow(QMainWindow):
         settings_layout = QVBoxLayout(self.settings_dialog)
         settings_layout.setContentsMargins(18, 18, 18, 14)
         settings_hint = QLabel(
-            "参数会自动保存，并在下一次推理循环中生效。CUDA 开关在切换后会重新配置模型。"
+            "参数会自动保存，并在下一次安全推理边界生效。ONNX 后端可选 DirectML、CUDA 或 CPU。"
         )
         settings_hint.setObjectName("subtitle")
         settings_hint.setWordWrap(True)
@@ -275,12 +305,29 @@ class MainWindow(QMainWindow):
         self.bite_confirm.setRange(1, 10)
         self.feed_confirm = QSpinBox()
         self.feed_confirm.setRange(1, 10)
+        self.feed_min_interval = QDoubleSpinBox()
+        self.feed_min_interval.setRange(0.2, 1.0)
+        self.feed_min_interval.setSingleStep(0.05)
+        self.feed_min_interval.setDecimals(2)
+        self.feed_retry_interval = QDoubleSpinBox()
+        self.feed_retry_interval.setRange(0.2, 3.0)
+        self.feed_retry_interval.setSingleStep(0.05)
+        self.feed_retry_interval.setDecimals(2)
+        self.feed_failure_limit = QSpinBox()
+        self.feed_failure_limit.setRange(1, 10)
+        self.result_max_age = QDoubleSpinBox()
+        self.result_max_age.setRange(0.1, 1.0)
+        self.result_max_age.setSingleStep(0.05)
+        self.result_max_age.setDecimals(2)
         self.inference_fps = QDoubleSpinBox()
-        self.inference_fps.setRange(1, 30)
+        self.inference_fps.setRange(1, 60)
         self.inference_fps.setSingleStep(1)
         self.preview_fps = QDoubleSpinBox()
-        self.preview_fps.setRange(5, 60)
-        self.preview_fps.setSingleStep(5)
+        self.preview_fps.setRange(5, 30)
+        self.preview_fps.setSingleStep(1)
+        self.yolo_imgsz = QSpinBox()
+        self.yolo_imgsz.setRange(320, 1280)
+        self.yolo_imgsz.setSingleStep(32)
         self.reel_cooldown = QDoubleSpinBox()
         self.reel_cooldown.setRange(0.2, 10)
         self.reel_cooldown.setSingleStep(0.1)
@@ -289,27 +336,43 @@ class MainWindow(QMainWindow):
         self.input_method.addItem("SendInput（纯扫描码）", "sendinput_raw_scan")
         self.input_method.addItem("SendInput（虚拟键）", "sendinput_vk")
         self.input_method.addItem("窗口消息（后台优先）", "postmessage")
-        self.use_cuda = QCheckBox("使用 CUDA GPU")
+        self.onnx_provider = QComboBox()
+        self.onnx_provider.addItem("DirectML", "directml")
+        self.onnx_provider.addItem("CUDA", "cuda")
+        self.onnx_provider.addItem("CPU", "cpu")
+        self.use_cuda = QCheckBox("PyTorch 使用 CUDA")
         form.addRow("YOLO 置信度", self.confidence)
         form.addRow("收杆最低置信度", self.bite_action_confidence)
         form.addRow("上钩确认帧", self.bite_confirm)
         form.addRow("红 0 确认帧", self.feed_confirm)
+        form.addRow("喂食最小间隔", self.feed_min_interval)
+        form.addRow("喂食失败重试间隔", self.feed_retry_interval)
+        form.addRow("喂食失败暂停次数", self.feed_failure_limit)
+        form.addRow("动作结果最大年龄", self.result_max_age)
         form.addRow("推理频率 FPS", self.inference_fps)
         form.addRow("预览频率 FPS", self.preview_fps)
+        form.addRow("模型输入尺寸", self.yolo_imgsz)
         form.addRow("收杆冷却", self.reel_cooldown)
         form.addRow("输入方式", self.input_method)
-        form.addRow("推理设备", self.use_cuda)
+        form.addRow("ONNX 推理后端", self.onnx_provider)
+        form.addRow("PyTorch 推理设备", self.use_cuda)
         for widget in (
             self.confidence,
             self.bite_action_confidence,
             self.bite_confirm,
             self.feed_confirm,
+            self.feed_min_interval,
+            self.feed_retry_interval,
+            self.feed_failure_limit,
+            self.result_max_age,
             self.inference_fps,
             self.preview_fps,
+            self.yolo_imgsz,
             self.reel_cooldown,
         ):
             widget.valueChanged.connect(self._settings_changed)
         self.input_method.currentIndexChanged.connect(self._settings_changed)
+        self.onnx_provider.currentIndexChanged.connect(self._settings_changed)
         self.use_cuda.stateChanged.connect(self._settings_changed)
         settings_layout.addWidget(params)
         settings_buttons = QDialogButtonBox(
@@ -362,11 +425,18 @@ class MainWindow(QMainWindow):
         self.bite_action_confidence.setValue(self.settings.bite_action_confidence)
         self.bite_confirm.setValue(self.settings.bite_confirm_frames)
         self.feed_confirm.setValue(self.settings.feed_confirm_frames)
+        self.feed_min_interval.setValue(self.settings.feed_min_interval_seconds)
+        self.feed_retry_interval.setValue(self.settings.feed_retry_interval_seconds)
+        self.feed_failure_limit.setValue(self.settings.feed_input_failure_limit)
+        self.result_max_age.setValue(self.settings.inference_result_max_age_seconds)
         self.inference_fps.setValue(self.settings.inference_fps)
         self.preview_fps.setValue(self.settings.preview_fps)
+        self.yolo_imgsz.setValue(self.settings.yolo_imgsz)
         self.reel_cooldown.setValue(self.settings.reel_cooldown_seconds)
         input_index = self.input_method.findData(self.settings.input_method)
         self.input_method.setCurrentIndex(max(0, input_index))
+        provider_index = self.onnx_provider.findData(self.settings.onnx_provider)
+        self.onnx_provider.setCurrentIndex(max(0, provider_index))
         self.use_cuda.setChecked(self.settings.use_cuda)
 
     def _read_settings(self) -> AppSettings:
@@ -381,11 +451,20 @@ class MainWindow(QMainWindow):
             bite_action_confidence=self.bite_action_confidence.value(),
             bite_confirm_frames=self.bite_confirm.value(),
             feed_confirm_frames=self.feed_confirm.value(),
+            feed_min_interval_seconds=self.feed_min_interval.value(),
+            feed_retry_interval_seconds=max(
+                self.feed_min_interval.value(),
+                self.feed_retry_interval.value(),
+            ),
+            feed_input_failure_limit=self.feed_failure_limit.value(),
+            inference_result_max_age_seconds=self.result_max_age.value(),
             inference_fps=self.inference_fps.value(),
             preview_fps=self.preview_fps.value(),
+            yolo_imgsz=self.yolo_imgsz.value(),
             reel_cooldown_seconds=self.reel_cooldown.value(),
             input_method=str(self.input_method.currentData()),
             use_cuda=self.use_cuda.isChecked(),
+            onnx_provider=str(self.onnx_provider.currentData()),
         )
 
     @Slot()
@@ -408,10 +487,14 @@ class MainWindow(QMainWindow):
         self.run_state.setText("启动中")
         self.run_state.setStyleSheet("color:#f0b35b; font-weight:800; padding:8px 12px;")
         self.controller = WorkerController(self.paths, self.settings)
-        self.controller.worker.frame_ready.connect(self._on_frame)
+        self.controller.worker.frame_ready.connect(
+            self.frame_mailbox.push,
+            Qt.ConnectionType.DirectConnection,
+        )
         self.controller.worker.metrics_ready.connect(self._on_metrics)
         self.controller.worker.status_ready.connect(self._on_status)
         self.controller.worker.log_ready.connect(self._on_log)
+        self.controller.worker.input_test_result.connect(self._on_input_test_result)
         self.controller.thread.finished.connect(self._on_session_finished)
         self.controller.start()
         self._on_log("info", "开始启动检测会话")
@@ -431,10 +514,17 @@ class MainWindow(QMainWindow):
     def _run_input_test(self, action: str) -> None:
         if self.controller is None or not self._session_started:
             return
-        ok, result = self.controller.test_input(action)
+        self.controller.test_input(action)
+        self._on_log(
+            "info",
+            f"输入测试 {action} 已提交到检测线程",
+        )
+
+    @Slot(bool, str)
+    def _on_input_test_result(self, ok: bool, result: str) -> None:
         self._on_log(
             "info" if ok else "error",
-            f"输入测试 {action}: {'成功' if ok else '失败'} / {result}",
+            f"输入测试结果: {'成功' if ok else '失败'} / {result}",
         )
 
     def emergency_stop(self) -> None:
@@ -445,8 +535,11 @@ class MainWindow(QMainWindow):
             self.controller.emergency_stop()
         self._on_log("warning", "紧急停止：已关闭总开关、自动收杆和自动喂食")
 
-    @Slot(object)
-    def _on_frame(self, image) -> None:
+    @Slot()
+    def _on_frame(self) -> None:
+        image = self.frame_mailbox.take()
+        if image is None:
+            return
         self._display_frames += 1
         now = time.perf_counter()
         elapsed = now - self._display_fps_started
@@ -470,20 +563,27 @@ class MainWindow(QMainWindow):
             f'{metrics["bite_confidence"]:.3f}  / 连续 {metrics["bite_streak"]} 帧'
         )
         self.feed_value.setText(
-            f'{metrics["feed_label"]}  (0={metrics["zero_score"]:.3f}, 非0={metrics["nonzero_score"]:.3f})'
+            f'{metrics["feed_label"]} / {metrics["feed_state"]} '
+            f'(0={metrics["zero_score"]:.3f}, 非0={metrics["nonzero_score"]:.3f})'
         )
         self.status_value.setText(metrics["status"])
         self.action_value.setText(metrics["last_action"])
         self.performance_value.setText(
-            f'循环 {metrics["preview_fps"]:.1f} FPS / '
+            f'采集 {metrics["capture_fps"]:.1f} FPS / '
             f'画面 {self._display_fps:.1f} FPS / '
             f'推理 {metrics["inference_fps"]:.1f} FPS / '
             f'推理 {metrics["inference_ms"]:.0f} ms / '
             f'采集 {metrics["capture_ms"]:.1f} ms / '
+            f'结果年龄 {metrics["result_age_ms"]:.0f} ms / '
+            f'跳过 {metrics["inference_skipped"]} / '
+            f'推理 p95 {metrics["inference_stats"]["p95"]:.0f} ms / '
+            f'会话 p95 {metrics["session_stats"]["p95"]:.0f} ms / '
+            f'{metrics["onnx_device"]} input={metrics["onnx_input"]} / '
             f'{metrics["capture_backend"]}'
         )
         self.target_value.setText(
             f'{metrics["target_window"]} / {metrics["target_privilege"]} / '
+            f'前台={metrics["target_foreground"]} / '
             f'{metrics["input_result"]}'
         )
 
