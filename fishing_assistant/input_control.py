@@ -101,6 +101,7 @@ class WindowsInputController:
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     TOKEN_QUERY = 0x0008
     TOKEN_INFORMATION_CLASS_ELEVATION = 20
+    _cached_user32 = None
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -114,6 +115,8 @@ class WindowsInputController:
 
     @staticmethod
     def _user32():
+        if WindowsInputController._cached_user32 is not None:
+            return WindowsInputController._cached_user32
         user32 = ctypes.windll.user32
         user32.EnumWindows.argtypes = (
             ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM),
@@ -182,6 +185,7 @@ class WindowsInputController:
         user32.PostMessageW.restype = wintypes.BOOL
         user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
         user32.MapVirtualKeyW.restype = wintypes.UINT
+        WindowsInputController._cached_user32 = user32
         return user32
 
     @classmethod
@@ -392,6 +396,15 @@ class WindowsInputController:
     def target_privilege(self) -> str:
         return self._target_privilege
 
+    @property
+    def target_is_foreground(self) -> bool:
+        user32 = self._user32()
+        return bool(
+            self._target_hwnd
+            and user32.GetForegroundWindow() == self._target_hwnd
+            and self._is_target_window(self._target_hwnd)
+        )
+
     def observe_foreground_window(self) -> str | None:
         """Bind a visible top-level window belonging to PetitPlanet.exe."""
         user32 = self._user32()
@@ -439,11 +452,15 @@ class WindowsInputController:
     def _resolve_target(self):
         self.observe_foreground_window()
         user32 = self._user32()
-        if self._target_hwnd and self._is_target_window(self._target_hwnd):
+        if (
+            self._target_hwnd
+            and self._is_target_window(self._target_hwnd)
+            and user32.GetForegroundWindow() == self._target_hwnd
+        ):
             return self._target_hwnd
-        self.last_result = "未绑定 PetitPlanet.exe，已拒绝发送"
-        if user32.GetForegroundWindow():
-            foreground = user32.GetForegroundWindow()
+        self.last_result = "目标游戏窗口未在前台，已拒绝发送"
+        foreground = user32.GetForegroundWindow()
+        if foreground:
             self.last_result += f" (当前={self.describe_window(foreground)})"
         else:
             self.last_result += " (没有前台窗口)"
@@ -563,38 +580,11 @@ class WindowsInputController:
         user32 = self._user32()
         if user32.GetForegroundWindow() == hwnd:
             return True
-
-        user32.ShowWindow(hwnd, self.SW_RESTORE)
-        kernel32 = ctypes.windll.kernel32
-        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
-        caller_thread = int(kernel32.GetCurrentThreadId())
-        target_thread = int(user32.GetWindowThreadProcessId(hwnd, None))
-        attached = False
-        if target_thread and target_thread != caller_thread:
-            attached = bool(
-                user32.AttachThreadInput(
-                    caller_thread,
-                    target_thread,
-                    True,
-                )
-            )
-        try:
-            user32.BringWindowToTop(hwnd)
-            user32.SetForegroundWindow(hwnd)
-            user32.SetFocus(hwnd)
-        finally:
-            if attached:
-                user32.AttachThreadInput(caller_thread, target_thread, False)
-
-        time.sleep(0.035)
-        activated = user32.GetForegroundWindow() == hwnd
-        if not activated:
-            user32.PostMessageW(hwnd, self.WM_ACTIVATE, self.WA_ACTIVE, 0)
-            self.last_result = (
-                f"目标未成为前台窗口，已拒绝 SendInput "
-                f"{self._target_privilege} {self.describe_window(hwnd)}"
-            )
-        return activated
+        self.last_result = (
+            f"目标未在前台，已拒绝输入 "
+            f"{self._target_privilege} {self.describe_window(hwnd)}"
+        )
+        return False
 
     def _post_key(self) -> bool:
         hwnd = self._resolve_target()

@@ -30,10 +30,14 @@ class AppSettings:
     bite_action_confidence: float = 0.15
     bite_confirm_frames: int = 1
     feed_confirm_frames: int = 3
+    feed_min_interval_seconds: float = 0.35
+    feed_retry_interval_seconds: float = 0.75
+    feed_input_failure_limit: int = 3
     reel_cooldown_seconds: float = 1.5
-    inference_fps: float = 30.0
-    preview_fps: float = 30.0
-    yolo_imgsz: int = 1280
+    inference_result_max_age_seconds: float = 0.30
+    inference_fps: float = 25.0
+    preview_fps: float = 12.0
+    yolo_imgsz: int = 960
     use_cuda: bool = True
     input_method: str = "sendinput_scan"
     monitor_index: int = 0

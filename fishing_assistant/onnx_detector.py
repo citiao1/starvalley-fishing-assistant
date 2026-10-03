@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,15 +32,21 @@ class OnnxBiteDetector:
         self.input_name = ""
         self.device = "cpu"
         self._dll_handles: list[Any] = []
+        self.last_timing: dict[str, float] = {}
+        self.input_shape: tuple[Any, ...] = ()
+        self.output_shapes: list[tuple[Any, ...]] = []
+        self.model_sha256 = ""
 
     def load(self) -> str:
         if not self.model_path.exists():
             raise FileNotFoundError(f"找不到 ONNX 权重: {self.model_path}")
         self._open_session()
         providers = ", ".join(self.session.get_providers())
+        self.model_sha256 = _sha256_file(self.model_path)
         return (
             f"ONNX 模型已加载: {self.model_path.name} / "
-            f"device={self.device} / providers={providers}"
+            f"device={self.device} / providers={providers} / "
+            f"input={self.input_shape} / sha256={self.model_sha256[:16]}"
         )
 
     def _open_session(self) -> None:
@@ -53,17 +61,24 @@ class OnnxBiteDetector:
             "cuda": "CUDAExecutionProvider",
             "directml": "DmlExecutionProvider",
             "cpu": "CPUExecutionProvider",
-        }.get(self.execution_provider, "CPUExecutionProvider")
+        }.get(
+            self.execution_provider if self.use_cuda or self.execution_provider != "cuda" else "cpu",
+            "CPUExecutionProvider",
+        )
         requested = (
             [provider_name, "CPUExecutionProvider"]
             if provider_name != "CPUExecutionProvider"
             else ["CPUExecutionProvider"]
         )
+        self.session = None
         self.session = ort.InferenceSession(
             str(self.model_path),
             providers=requested,
         )
-        self.input_name = self.session.get_inputs()[0].name
+        input_info = self.session.get_inputs()[0]
+        self.input_name = input_info.name
+        self.input_shape = tuple(input_info.shape)
+        self.output_shapes = [tuple(item.shape) for item in self.session.get_outputs()]
         active = self.session.get_providers()
         active_provider = next(
             (name for name in requested if name in active),
@@ -75,13 +90,35 @@ class OnnxBiteDetector:
             "CPUExecutionProvider": "cpu",
         }[active_provider]
 
-    def configure(self, confidence: float, use_cuda: bool) -> bool:
-        previous_device = self.device
+    def configure(
+        self,
+        confidence: float,
+        use_cuda: bool,
+        image_size: int,
+        execution_provider: str,
+    ) -> bool:
+        previous_device = (self.device, self.image_size, self.execution_provider)
+        previous_requested_provider = self.execution_provider
+        previous_effective_provider = (
+            previous_requested_provider
+            if self.use_cuda or previous_requested_provider != "cuda"
+            else "cpu"
+        )
         self.confidence = confidence
-        if use_cuda != self.use_cuda or self.session is None:
-            self.use_cuda = use_cuda
+        self.image_size = int(image_size)
+        self.use_cuda = use_cuda
+        self.execution_provider = execution_provider
+        current_provider = (
+            self.execution_provider
+            if self.use_cuda or self.execution_provider != "cuda"
+            else "cpu"
+        )
+        if (
+            self.session is None
+            or current_provider != previous_effective_provider
+        ):
             self._open_session()
-        return self.device != previous_device
+        return (self.device, self.image_size, self.execution_provider) != previous_device
 
     def detect(
         self,
@@ -90,16 +127,30 @@ class OnnxBiteDetector:
         if self.session is None:
             return [], 0.0
 
+        started = time.perf_counter()
+        timing: dict[str, float] = {}
+        stage_started = time.perf_counter()
         image, gain, pad_x, pad_y = self._letterbox(frame)
+        timing["letterbox_ms"] = (time.perf_counter() - stage_started) * 1000
+        stage_started = time.perf_counter()
         tensor = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        tensor = tensor.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+        tensor = np.ascontiguousarray(
+            tensor.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+        )
+        timing["tensor_ms"] = (time.perf_counter() - stage_started) * 1000
+        stage_started = time.perf_counter()
         outputs = self.session.run(None, {self.input_name: tensor})
+        timing["session_ms"] = (time.perf_counter() - stage_started) * 1000
+        stage_started = time.perf_counter()
         prediction = np.asarray(outputs[0])
         if prediction.ndim == 3:
             prediction = prediction[0]
         if prediction.shape[0] < prediction.shape[1]:
             prediction = prediction.transpose(1, 0)
         if prediction.shape[1] < 5:
+            timing["postprocess_ms"] = (time.perf_counter() - stage_started) * 1000
+            timing["total_ms"] = (time.perf_counter() - started) * 1000
+            self.last_timing = timing
             return [], 0.0
 
         boxes_xywh = prediction[:, :4]
@@ -108,6 +159,9 @@ class OnnxBiteDetector:
         scores = class_scores[np.arange(len(class_scores)), class_ids]
         keep = (class_ids == 0) & (scores >= self.confidence)
         if not np.any(keep):
+            timing["postprocess_ms"] = (time.perf_counter() - stage_started) * 1000
+            timing["total_ms"] = (time.perf_counter() - started) * 1000
+            self.last_timing = timing
             return [], 0.0
 
         boxes_xywh = boxes_xywh[keep]
@@ -148,6 +202,9 @@ class OnnxBiteDetector:
             )
         detections.sort(key=lambda item: item[4], reverse=True)
         detections = detections[:5]
+        timing["postprocess_ms"] = (time.perf_counter() - stage_started) * 1000
+        timing["total_ms"] = (time.perf_counter() - started) * 1000
+        self.last_timing = timing
         return detections, max((item[4] for item in detections), default=0.0)
 
     def _letterbox(
@@ -155,14 +212,16 @@ class OnnxBiteDetector:
         frame: np.ndarray,
     ) -> tuple[np.ndarray, float, float, float]:
         height, width = frame.shape[:2]
-        gain = min(self.image_size / height, self.image_size / width)
+        target_height, target_width = self._target_input_size()
+        gain = min(target_width / width, target_height / height)
         resized_width = round(width * gain)
         resized_height = round(height * gain)
-        pad_width = self.image_size - resized_width
-        pad_height = self.image_size - resized_height
-        stride = 32
-        pad_width %= stride
-        pad_height %= stride
+        pad_width = target_width - resized_width
+        pad_height = target_height - resized_height
+        if not self._has_fixed_input_shape():
+            stride = 32
+            pad_width %= stride
+            pad_height %= stride
         left = pad_width / 2
         top = pad_height / 2
 
@@ -187,10 +246,22 @@ class OnnxBiteDetector:
         )
         return frame, gain, left, top
 
+    def _has_fixed_input_shape(self) -> bool:
+        return (
+            len(self.input_shape) == 4
+            and isinstance(self.input_shape[2], int)
+            and isinstance(self.input_shape[3], int)
+        )
+
+    def _target_input_size(self) -> tuple[int, int]:
+        if self._has_fixed_input_shape():
+            return int(self.input_shape[2]), int(self.input_shape[3])
+        return self.image_size, self.image_size
+
     @staticmethod
     def resize_for_inference(
         frame: np.ndarray,
-        max_width: int = 1280,
+        max_width: int = 960,
     ) -> tuple[np.ndarray, float, float]:
         height, width = frame.shape[:2]
         if width <= max_width:
@@ -203,3 +274,11 @@ class OnnxBiteDetector:
             interpolation=cv2.INTER_AREA,
         )
         return resized, width / target_width, height / target_height
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
