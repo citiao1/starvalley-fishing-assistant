@@ -2,17 +2,17 @@
 
 Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime DirectML 进行 GPU 推理，识别上钩图标；使用 OpenCV 模板识别右下角红色体力数字，并根据状态执行自动收杆和自动喂食。
 
-当前正式版使用小体积 DirectML 发行版。解压后的目录约 330 MB，压缩包约 138 MB，不依赖本地 Python 或 IDE，解压后即可运行。
+当前正式版为 `v1.1.3` 高帧率 DirectML 版本。解压后的目录约 330 MB，压缩包约 141 MB，不依赖本地 Python 或 IDE，解压后即可运行。
 
 ## 下载
 
-正式版本：[v1.1.0 正式版（ONNX DirectML）](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.0-optimized-directml)
+正式版本：[v1.1.3 高帧率版（ONNX DirectML）](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.3-high-fps)
 
-直接下载：[starvalley-fishing-assistant-onnx-directml-optimized-20261003.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.0-optimized-directml/starvalley-fishing-assistant-onnx-directml-optimized-20261003.zip)
+直接下载：[starvalley-fishing-assistant-onnx-directml-high-fps-20261004.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.3-high-fps/starvalley-fishing-assistant-onnx-directml-high-fps-20261004.zip)
 
-优化预发布版（高帧率推理 + 输入修复）：[v1.1.3 高帧率版](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.3-high-fps)
+上一版正式包：[v1.1.0 正式版（ONNX DirectML）](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.0-optimized-directml)
 
-预发布包：[starvalley-fishing-assistant-onnx-directml-high-fps-20261004.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.3-high-fps/starvalley-fishing-assistant-onnx-directml-high-fps-20261004.zip)
+上一版直接下载：[starvalley-fishing-assistant-onnx-directml-optimized-20261003.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.0-optimized-directml/starvalley-fishing-assistant-onnx-directml-optimized-20261003.zip)
 
 训练集备份：[backup-dataset-final-2026-10-02.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.0.0/backup-dataset-final-2026-10-02.zip)
 
