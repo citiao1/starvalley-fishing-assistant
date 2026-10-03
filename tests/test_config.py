@@ -65,6 +65,25 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertEqual(settings.monitor_index, 0)
         self.assertEqual(settings.onnx_device_id, 16)
 
+    def test_legacy_performance_defaults_are_migrated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self.make_paths(directory)
+            paths.settings_file.write_text(
+                json.dumps(
+                    {
+                        "inference_fps": 30,
+                        "yolo_imgsz": 1280,
+                        "monitor_index": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(paths)
+
+        self.assertEqual(settings.inference_fps, 25.0)
+        self.assertEqual(settings.yolo_imgsz, 960)
+
 
 if __name__ == "__main__":
     unittest.main()

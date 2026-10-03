@@ -94,10 +94,12 @@ class AppPaths:
 
 def load_settings(paths: AppPaths) -> AppSettings:
     defaults = asdict(AppSettings())
+    loaded_values: dict[str, object] = {}
     try:
         if paths.settings_file.exists():
             values = json.loads(paths.settings_file.read_text(encoding="utf-8"))
             if isinstance(values, dict):
+                loaded_values = values
                 defaults.update(
                     {key: value for key, value in values.items() if key in defaults}
                 )
@@ -110,6 +112,7 @@ def load_settings(paths: AppPaths) -> AppSettings:
         defaults["inference_backend"] = backend
     if provider in {"cuda", "directml", "cpu"}:
         defaults["onnx_provider"] = provider
+    _migrate_legacy_performance_defaults(defaults, loaded_values)
     for key in (
         "master_enabled",
         "bite_detection_enabled",
@@ -263,6 +266,19 @@ def _coerce_bool(value: object, fallback: bool) -> bool:
 def _safe_choice(value: object, choices: set[str], fallback: str) -> str:
     normalized = str(value).strip().lower()
     return normalized if normalized in choices else fallback
+
+
+def _migrate_legacy_performance_defaults(
+    values: dict[str, object],
+    loaded: dict[str, object],
+) -> None:
+    """Move the pre-window-capture defaults to the current performance baseline."""
+    if "capture_source" in loaded or not loaded:
+        return
+    if loaded.get("yolo_imgsz") == 1280:
+        values["yolo_imgsz"] = 960
+    if loaded.get("inference_fps") == 30:
+        values["inference_fps"] = 25.0
 
 
 def _bounded_float(
