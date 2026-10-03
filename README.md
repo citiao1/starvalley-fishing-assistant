@@ -10,6 +10,10 @@ Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime DirectML 进行 GPU
 
 直接下载：[starvalley-fishing-assistant-onnx-directml-optimized-20261003.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.0-optimized-directml/starvalley-fishing-assistant-onnx-directml-optimized-20261003.zip)
 
+优化预发布版（窗口采集与 DirectML 设备优化）：[v1.1.1 优化预发布版](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.1-optimized-window-capture)
+
+预发布包：[starvalley-fishing-assistant-onnx-directml-optimized-20261003.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.1-optimized-window-capture/starvalley-fishing-assistant-onnx-directml-optimized-20261003.zip)
+
 训练集备份：[backup-dataset-final-2026-10-02.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.0.0/backup-dataset-final-2026-10-02.zip)
 
 下载程序包后：
