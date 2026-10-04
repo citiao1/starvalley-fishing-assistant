@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import ctypes
 import sys
 import threading
 import time
@@ -38,6 +39,15 @@ GAME_ACTIVE = "GAME_ACTIVE"
 GAME_INACTIVE = "GAME_INACTIVE"
 GAME_MINIMIZED = "GAME_MINIMIZED"
 WINDOW_INVALID = "WINDOW_INVALID"
+
+
+def _needs_frame_processing(settings: AppSettings) -> bool:
+    """Return whether the current settings require capture or inference."""
+    return bool(
+        settings.bite_detection_enabled
+        or settings.auto_feed_enabled
+        or settings.preview_enabled
+    )
 
 
 class BiteDetector:
@@ -533,6 +543,7 @@ class DetectionWorker(QObject):
         self._next_preview_at = 0.0
         self._activity_state = WINDOW_INVALID
         self._last_window_description = ""
+        self._inference_priority_set = False
 
     @Slot(object)
     def apply_settings(self, settings: AppSettings) -> None:
@@ -692,6 +703,24 @@ class DetectionWorker(QObject):
         )
         try:
             self._input.clear_emergency_stop()
+            self._preview_started_at = time.perf_counter()
+            self._last_metrics_at = 0.0
+            self._next_preview_at = 0.0
+            self._capture_frames = 0
+            self._inference_frames = 0
+            self._set_status("检测和预览均已关闭")
+            while (
+                not self._stop_event.is_set()
+                and not _needs_frame_processing(self.settings)
+            ):
+                QCoreApplication.processEvents()
+                self._apply_emergency_stop()
+                self._apply_pending_settings_if_idle()
+                self._emit_metrics(None)
+                time.sleep(0.10)
+            if self._stop_event.is_set():
+                return
+
             startup_started = time.perf_counter()
             self._capture = ScreenCapture(
                 self.settings.monitor_index,
@@ -797,8 +826,8 @@ class DetectionWorker(QObject):
                 f"total_startup_ms={(time.perf_counter() - startup_started) * 1000:.1f}",
                 force=True,
             )
-            # Start the FPS window after model/template initialization so the
-            # startup delay does not permanently depress the displayed rate.
+            # Start the active FPS window after model/template initialization
+            # so the startup delay does not depress the displayed rate.
             self._preview_started_at = time.perf_counter()
             self._last_metrics_at = 0.0
             self._next_preview_at = 0.0
@@ -815,6 +844,13 @@ class DetectionWorker(QObject):
                     next_event_pump_at = loop_now + 0.10
                 self._apply_emergency_stop()
                 self._apply_pending_settings_if_idle()
+                if not _needs_frame_processing(self.settings):
+                    if self._capture.is_started:
+                        self._capture.pause()
+                    self._emit_metrics(None)
+                    self._set_status("检测和预览均已关闭")
+                    time.sleep(0.10)
+                    continue
                 target_info = self._input.refresh_target()
                 self._update_activity_state(target_info)
                 if target_info.description != self._last_window_description:
@@ -904,30 +940,51 @@ class DetectionWorker(QObject):
                 )
                 if self._inference_future is None and now >= next_inference_at:
                     settings_snapshot = replace(self.settings)
-                    resize_started = time.perf_counter()
-                    inference_frame, scale_x, scale_y = (
-                        self._bite.resize_for_inference(
-                            frame,
-                            max_width=settings_snapshot.yolo_imgsz,
+                    needs_inference = bool(
+                        settings_snapshot.bite_detection_enabled
+                        or settings_snapshot.auto_feed_enabled
+                        or settings_snapshot.preview_enabled
+                    )
+                    if needs_inference:
+                        resize_started = time.perf_counter()
+                        inference_frame, scale_x, scale_y = (
+                            self._bite.resize_for_inference(
+                                frame,
+                                max_width=settings_snapshot.yolo_imgsz,
+                            )
+                            if (
+                                self._bite is not None
+                                and settings_snapshot.bite_detection_enabled
+                            )
+                            else (frame, 1.0, 1.0)
                         )
-                        if self._bite is not None
-                        else (frame, 1.0, 1.0)
-                    )
-                    self._last_resize_ms = (time.perf_counter() - resize_started) * 1000
-                    self._timing_samples["resize_ms"].append(self._last_resize_ms)
-                    feed_x1, feed_y1, feed_x2, feed_y2 = (
-                        self._feed_roi_bounds(frame)
-                    )
-                    self._inference_future = self._executor.submit(
-                        self._detect_frame,
-                        inference_frame,
-                        frame[feed_y1:feed_y2, feed_x1:feed_x2].copy(),
-                        scale_x,
-                        scale_y,
-                        settings_snapshot,
-                        time.monotonic(),
-                    )
-                    next_inference_at = now + inference_interval
+                        self._last_resize_ms = (
+                            time.perf_counter() - resize_started
+                        ) * 1000
+                        self._timing_samples["resize_ms"].append(
+                            self._last_resize_ms
+                        )
+                        feed_x1, feed_y1, feed_x2, feed_y2 = (
+                            self._feed_roi_bounds(frame)
+                        )
+                        feed_frame = (
+                            frame[feed_y1:feed_y2, feed_x1:feed_x2].copy()
+                            if (
+                                settings_snapshot.auto_feed_enabled
+                                or settings_snapshot.preview_enabled
+                            )
+                            else frame[0:0, 0:0].copy()
+                        )
+                        self._inference_future = self._executor.submit(
+                            self._detect_frame,
+                            inference_frame,
+                            feed_frame,
+                            scale_x,
+                            scale_y,
+                            settings_snapshot,
+                            time.monotonic(),
+                        )
+                        next_inference_at = now + inference_interval
                 elif self._inference_future is not None and now >= next_inference_at:
                     self._inference_skipped += 1
                     next_inference_at = now + inference_interval
@@ -987,6 +1044,8 @@ class DetectionWorker(QObject):
         settings: AppSettings,
         captured_at: float,
     ) -> DetectionResult:
+        if not self._inference_priority_set:
+            self._set_inference_thread_priority()
         started = time.perf_counter()
         bite_boxes: list[tuple[int, int, int, int, float]] = []
         bite_confidence = 0.0
@@ -1006,7 +1065,10 @@ class DetectionWorker(QObject):
                 for x1, y1, x2, y2, confidence in detected_boxes
             ]
             timing.update(getattr(self._bite, "last_timing", {}))
-        if self._feed is not None:
+        if (
+            self._feed is not None
+            and (settings.auto_feed_enabled or settings.preview_enabled)
+        ):
             feed_started = time.perf_counter()
             feed_label, zero_score, nonzero_score = self._feed.classify_roi(feed_roi)
             timing["feed_ms"] = (time.perf_counter() - feed_started) * 1000
@@ -1022,6 +1084,20 @@ class DetectionWorker(QObject):
             captured_at=captured_at,
             timing=timing,
         )
+
+    def _set_inference_thread_priority(self) -> None:
+        self._inference_priority_set = True
+        if sys.platform != "win32":
+            return
+        try:
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetCurrentThread.restype = ctypes.c_void_p
+            kernel32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            kernel32.SetThreadPriority.restype = ctypes.c_bool
+            # THREAD_PRIORITY_BELOW_NORMAL
+            kernel32.SetThreadPriority(kernel32.GetCurrentThread(), -1)
+        except Exception:
+            self._log("debug", "无法降低推理线程优先级")
 
     def _update_activity_state(self, info: TargetWindowInfo) -> None:
         if not info.valid:

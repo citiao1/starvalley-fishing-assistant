@@ -88,6 +88,7 @@ class OnnxBiteDetector:
     def _load_auto(self) -> str:
         candidates: list[tuple[OnnxBiteDetector, float]] = []
         requested_device_id = self.device_id
+        self.auto_selection_note = ""
         for provider, device_id in (
             ("directml", requested_device_id),
             ("cpu", 0),
@@ -118,6 +119,30 @@ class OnnxBiteDetector:
         if not candidates:
             raise RuntimeError("auto provider 没有可用的 ONNX Runtime 后端")
         selected, selected_ms = min(candidates, key=lambda item: item[1])
+        cpu_candidate = next(
+            ((candidate, elapsed) for candidate, elapsed in candidates if candidate.device == "cpu"),
+            None,
+        )
+        directml_candidate = next(
+            (
+                (candidate, elapsed)
+                for candidate, elapsed in candidates
+                if candidate.device.startswith("directml")
+            ),
+            None,
+        )
+        if (
+            cpu_candidate is not None
+            and directml_candidate is not None
+            and directml_candidate[1] > cpu_candidate[1] * 0.80
+        ):
+            # A small synthetic benchmark advantage is not worth adding GPU
+            # contention to the game. Require a clear DirectML win.
+            selected, selected_ms = cpu_candidate
+            self.auto_selection_note = (
+                f"auto保护游戏帧时间，CPU={cpu_candidate[1]:.1f} ms，"
+                f"DirectML={directml_candidate[1]:.1f} ms"
+            )
         for candidate, _ in candidates:
             if candidate is not selected:
                 candidate.session = None
@@ -130,9 +155,10 @@ class OnnxBiteDetector:
         self.device_id = selected.device_id
         self.model_sha256 = selected.model_sha256
         self.last_error = ""
-        self.auto_selection_note = (
-            f"auto选择 {selected.device}，session p50={selected_ms:.1f} ms"
-        )
+        if not self.auto_selection_note:
+            self.auto_selection_note = (
+                f"auto选择 {selected.device}，session p50={selected_ms:.1f} ms"
+            )
         return (
             f"ONNX 模型已加载: {self.model_path.name} / "
             f"requested=auto / device={self.device} / "
@@ -172,8 +198,15 @@ class OnnxBiteDetector:
             if provider_name != "CPUExecutionProvider"
             else ["CPUExecutionProvider"]
         )
+        session_options = ort.SessionOptions()
+        # Keep CPU fallback/inference from creating a large burst of worker
+        # threads that can compete with the game render thread.
+        session_options.intra_op_num_threads = 1
+        session_options.inter_op_num_threads = 1
+        session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         new_session = ort.InferenceSession(
             str(self.model_path),
+            sess_options=session_options,
             providers=requested,
         )
         input_info = new_session.get_inputs()[0]

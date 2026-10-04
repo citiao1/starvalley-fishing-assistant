@@ -2,13 +2,13 @@
 
 Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime 自动选择 DirectML 或 CPU 推理，识别上钩图标；使用 OpenCV 模板识别右下角红色体力数字，并根据状态执行自动收杆和自动喂食。
 
-当前正式版为 `v1.1.3` 高帧率 DirectML 版本。解压后的目录约 330 MB，压缩包约 141 MB，不依赖本地 Python 或 IDE，解压后即可运行。
+当前正式版为 `v1.1.4` 性能优化版（ONNX Auto），基于用户验证后确认发布的 ICU 修正版。不依赖本地 Python 或 IDE，完整解压后即可运行。用户反馈游戏掉帧略有改善，但尚未彻底解决；正式发布不代表已经消除所有性能影响。
 
 ## 下载
 
-正式版本：[v1.1.3 高帧率版（ONNX DirectML）](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.3-high-fps)
+正式版本：[v1.1.4 性能优化版（ONNX Auto）](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.4)
 
-直接下载：[starvalley-fishing-assistant-onnx-directml-high-fps-20261004.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.3-high-fps/starvalley-fishing-assistant-onnx-directml-high-fps-20261004.zip)
+直接下载：[starvalley-fishing-assistant-v1.1.4-onnx-auto.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.4/starvalley-fishing-assistant-v1.1.4-onnx-auto.zip)
 
 上一版正式包：[v1.1.0 正式版（ONNX DirectML）](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.0-optimized-directml)
 
@@ -19,9 +19,21 @@ Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime 自动选择 Direct
 下载程序包后：
 
 1. 解压整个目录。
-2. 运行 `星布谷地钓鱼助手_ONNX_directml.exe`。
+2. 运行 `星布谷地钓鱼助手_ONNX_auto.exe`。
 3. 不要单独复制 exe，`_internal` 目录中的 DLL 和模型文件必须保留。
 4. 不要直接在压缩包内运行，建议解压到本地磁盘后再启动。
+5. 升级时解压到新目录，不要覆盖旧目录，避免残留不兼容的 ICU DLL；先用默认配置验证。
+
+## v1.1.4 更新
+
+- 咬杆检测、自动喂食和实时预览全部关闭时，不再启动采集和模型初始化；运行中关闭后暂停采集。
+- 默认采集和推理目标均为 10 FPS，模型输入 768，实时预览关闭。
+- ONNX CPU 推理限制为单线程、顺序执行，推理工作线程降低优先级。
+- Auto 模式仅在 DirectML 测试耗时至少比 CPU 低 20% 时优先选择 DirectML。这是启发式策略，不是游戏帧率保证。
+- 修复 Poppler ICU 78 DLL 混入发行包造成的 `ucnv_open` 入口点错误；构建后自动核验 Qt 所需 ICU 导出符号。
+- 保留全画面咬杆检测、喂食状态转换、前台输入校验和 F12 紧急停止。
+
+详细记录见 [发布总结](docs/release-summary-v1.1.4.md)。
 
 ## 主要功能
 
@@ -31,8 +43,8 @@ Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime 自动选择 Direct
 - 支持预览 / 仅识别模式。
 - 默认只采集 `PetitPlanet.exe` 游戏窗口客户区，不把助手窗口或其他桌面内容送入识别。
 - 游戏窗口非前台、最小化、关闭或无法绑定时，默认暂停采集和推理。
-- 默认采集 15 FPS、DXcam 缓冲 2 帧，默认关闭实时预览；可切换到指定显示器采集作为兼容回退。
-- ONNX 推理后端默认自动对比真实图像路径的 DirectML 和 CPU 耗时，选择当前更快的 provider；也可以手动选择 DirectML、CUDA 或 CPU。
+- 默认采集 10 FPS、DXcam 缓冲 2 帧，默认关闭实时预览；可切换到指定显示器采集作为兼容回退。
+- ONNX 推理后端默认比较 DirectML 和 CPU 的图像推理耗时，优势不足 20% 时优先 CPU；也可以手动选择其他后端，实际可用性取决于安装的运行库。
 - 支持选择 DXcam 设备编号和 ONNX 设备编号，界面会显示实际 provider；DXcam 默认设备 0，ONNX 设备编号默认 1。
 - 支持窗口消息、SendInput 扫描码和虚拟键等输入方式。
 - 显示采集分辨率、识别置信度、推理 FPS、推理耗时、输入目标和最近动作。
@@ -74,8 +86,9 @@ Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime 自动选择 Direct
 
 ## 性能与输入安全
 
-- 默认参数为模型输入 `768`、推理目标 `15 FPS`、预览关闭、采集 `15 FPS`、缓冲 `2`，可在设置中调整并通过 p95 指标校准。界面中的推理 FPS 是实际完成速度，不是强制保证值。
-- 自动 provider 会执行一次真实图像路径基准；如果游戏打开时 DirectML 因跨 GPU 或驱动争抢变慢，会自动使用 CPU，避免“助手 GPU 占用很低但游戏仍掉帧”。
+- 默认参数为模型输入 `768`、推理目标 `10 FPS`、预览关闭、采集 `10 FPS`、缓冲 `2`，可在设置中调整并通过 p95 指标校准。界面中的推理 FPS 是实际完成速度，不是强制保证值。
+- 自动 provider 会使用随机图像测试完整预处理和推理路径，不直接测量游戏帧时间，因此不能保证消除 GPU 争抢或掉帧。
+- CPU/GPU 总占用率不足以判断游戏流畅度。性能对比应在同一场景、游戏保持前台时，观察游戏进程的帧时间和 p95/p99；助手界面的 FPS 不是游戏 FPS。
 - `模型输入尺寸=960/1280` 会增加推理和桌面复制开销；如果游戏仍卡顿，优先关闭预览、保持自动 provider，并确认采集频率不要高于实际需要。
 - 咬杆检测始终覆盖全屏，不使用固定咬杆 ROI。
 - “全屏”指当前采集区域的完整画面；默认区域是游戏客户区，不能把咬杆图标改成固定坐标 ROI。
@@ -109,13 +122,19 @@ FISHING_ASSISTANT_ONNX_PROVIDER=auto
 .\build_exe_onnx.ps1 -Provider auto
 ```
 
+正式版使用独立输出目录，避免覆盖正在运行的旧包：
+
+```powershell
+.\build_exe_onnx.ps1 -Provider auto -KeepBuild -DistPath dist\release-v1.1.4
+```
+
 输出目录：
 
 ```text
 dist\星布谷地钓鱼助手_ONNX_auto
 ```
 
-构建脚本会把 PyInstaller 缓存放在项目下的 `build\.pyinstaller-cache`。发布时应分发整个 onedir 目录，而不是只分发 exe。
+构建脚本会把 PyInstaller 缓存放在项目下的 `build\.pyinstaller-cache`，过滤 PATH 中的 Poppler 路径，并通过 `pefile` 检查 ICU 导出符号。请通过脚本构建，不要绕过环境过滤直接重新运行生成的 spec。发布时应分发整个 onedir 目录，而不是只分发 exe。
 
 ## 排障
 
@@ -159,6 +178,8 @@ app_data\diagnostics.json
 2. 确认 exe 与 `_internal` 位于同一发布目录。
 3. 不要重命名、移动或单独复制 exe。
 4. 查看 `app_data\startup_error.log`；如果存在 `WinError 126`、`WinError 127` 或 Qt DLL 错误，优先重新解压并更新 Windows。
+
+若提示 `ucnv_open` 入口点缺失，请使用 v1.1.4 并解压到空目录。旧测试包曾混入只导出 `ucnv_open_78` 的 Poppler ICU，不能通过覆盖 exe 修复；不要替换 Windows 系统 DLL。
 
 #### 2. 报“找不到 ONNX 权重”或“找不到红 0 模板”
 
@@ -251,7 +272,7 @@ app_data\settings.json
 
 部分推理参数会在下一次安全推理边界生效。如果设置文件损坏或启动后参数异常，关闭程序后删除 `app_data\settings.json`，重新启动即可恢复安全默认值；这不会删除模型和模板。
 
-旧版本曾使用 `1280/960` 输入尺寸、`25/30 FPS` 目标和实时预览，升级后会自动迁移为当前推荐的 `768`、`15 FPS`、关闭预览和自动 provider。如果仍看到旧值，可以在“检测参数”中手动改为推荐值，或删除 `app_data\settings.json` 后重新启动。
+旧版本曾使用 `1280/960` 输入尺寸、`25/30 FPS` 目标和实时预览，升级后会自动迁移为当前推荐的 `768`、`10 FPS`、关闭预览和自动 provider。如果仍看到旧值，可以在“检测参数”中手动改为推荐值，或删除 `app_data\settings.json` 后重新启动。
 
 #### 10. 诊断显示 `torch`、`ultralytics` 或 `torchvision` 缺失
 

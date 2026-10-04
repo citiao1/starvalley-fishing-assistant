@@ -37,9 +37,9 @@ class AppSettings:
     feed_input_failure_limit: int = 3
     reel_cooldown_seconds: float = 1.5
     inference_result_max_age_seconds: float = 0.30
-    inference_fps: float = 15.0
+    inference_fps: float = 10.0
     preview_fps: float = 12.0
-    capture_fps: float = 15.0
+    capture_fps: float = 10.0
     capture_buffer: int = 2
     capture_source: str = "game_window"
     window_probe_interval_seconds: float = 0.35
@@ -206,7 +206,7 @@ def load_settings(paths: AppPaths) -> AppSettings:
         defaults["inference_fps"],
         1.0,
         60.0,
-        15.0,
+        10.0,
     )
     defaults["preview_fps"] = _bounded_float(
         defaults["preview_fps"],
@@ -214,7 +214,7 @@ def load_settings(paths: AppPaths) -> AppSettings:
         30.0,
         12.0,
     )
-    defaults["capture_fps"] = _bounded_float(defaults["capture_fps"], 5.0, 60.0, 15.0)
+    defaults["capture_fps"] = _bounded_float(defaults["capture_fps"], 5.0, 60.0, 10.0)
     defaults["capture_buffer"] = _bounded_int(defaults["capture_buffer"], 1, 8, 2)
     defaults["window_probe_interval_seconds"] = _bounded_float(
         defaults["window_probe_interval_seconds"],
@@ -278,9 +278,9 @@ def _migrate_legacy_performance_defaults(
     if "preview_enabled" not in loaded:
         values["preview_enabled"] = False
     if "capture_fps" not in loaded:
-        values["capture_fps"] = 15.0
+        values["capture_fps"] = 10.0
     if loaded.get("inference_fps") in {25, 30, 25.0, 30.0}:
-        values["inference_fps"] = 15.0
+        values["inference_fps"] = 10.0
     if loaded.get("yolo_imgsz") in {960, 1280, 960.0, 1280.0}:
         values["yolo_imgsz"] = 768
     if "inference_backend" not in loaded:

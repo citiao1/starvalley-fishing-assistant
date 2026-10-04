@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from fishing_assistant.engine import ScreenCapture
+from fishing_assistant.config import AppSettings
+from fishing_assistant.engine import ScreenCapture, _needs_frame_processing
 from ctypes import wintypes
 
 from fishing_assistant.input_control import TargetWindowInfo, _same_hwnd
@@ -11,6 +12,43 @@ from fishing_assistant.onnx_detector import OnnxBiteDetector
 
 
 class CaptureLogicTests(unittest.TestCase):
+    def test_no_detection_or_preview_disables_frame_processing(self) -> None:
+        settings = AppSettings(
+            bite_detection_enabled=False,
+            auto_feed_enabled=False,
+            preview_enabled=False,
+        )
+        self.assertFalse(_needs_frame_processing(settings))
+
+    def test_any_visual_work_keeps_frame_processing_enabled(self) -> None:
+        self.assertTrue(
+            _needs_frame_processing(
+                AppSettings(
+                    bite_detection_enabled=True,
+                    auto_feed_enabled=False,
+                    preview_enabled=False,
+                )
+            )
+        )
+        self.assertTrue(
+            _needs_frame_processing(
+                AppSettings(
+                    bite_detection_enabled=False,
+                    auto_feed_enabled=True,
+                    preview_enabled=False,
+                )
+            )
+        )
+        self.assertTrue(
+            _needs_frame_processing(
+                AppSettings(
+                    bite_detection_enabled=False,
+                    auto_feed_enabled=False,
+                    preview_enabled=True,
+                )
+            )
+        )
+
     def make_capture(self) -> ScreenCapture:
         capture = ScreenCapture.__new__(ScreenCapture)
         capture._monitors = [

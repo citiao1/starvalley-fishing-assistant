@@ -81,9 +81,9 @@ class SettingsMigrationTests(unittest.TestCase):
 
             settings = load_settings(paths)
 
-        self.assertEqual(settings.inference_fps, 15.0)
+        self.assertEqual(settings.inference_fps, 10.0)
         self.assertEqual(settings.yolo_imgsz, 768)
-        self.assertEqual(settings.capture_fps, 15.0)
+        self.assertEqual(settings.capture_fps, 10.0)
         self.assertEqual(settings.onnx_provider, "auto")
 
 
