@@ -30,7 +30,7 @@ class SettingsMigrationTests(unittest.TestCase):
             settings = load_settings(paths)
 
         self.assertIsInstance(settings, AppSettings)
-        self.assertTrue(settings.preview_enabled)
+        self.assertFalse(settings.preview_enabled)
         self.assertTrue(settings.pause_when_inactive)
         self.assertEqual(settings.capture_source, "game_window")
         self.assertEqual(settings.capture_buffer, 2)
@@ -81,8 +81,10 @@ class SettingsMigrationTests(unittest.TestCase):
 
             settings = load_settings(paths)
 
-        self.assertEqual(settings.inference_fps, 25.0)
-        self.assertEqual(settings.yolo_imgsz, 960)
+        self.assertEqual(settings.inference_fps, 10.0)
+        self.assertEqual(settings.yolo_imgsz, 768)
+        self.assertEqual(settings.capture_fps, 10.0)
+        self.assertEqual(settings.onnx_provider, "auto")
 
 
 if __name__ == "__main__":

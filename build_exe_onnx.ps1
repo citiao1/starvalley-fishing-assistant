@@ -1,7 +1,8 @@
 param(
-    [ValidateSet("directml", "cuda")]
-    [string]$Provider = "directml",
-    [switch]$KeepBuild
+    [ValidateSet("auto", "directml", "cuda")]
+    [string]$Provider = "auto",
+    [switch]$KeepBuild,
+    [string]$DistPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,7 +16,7 @@ $pythonCandidates = @(
 $python = $pythonCandidates | Where-Object {
     Test-Path -LiteralPath $_
 } | Select-Object -First 1
-$depsCandidates = if ($Provider -eq "directml") {
+$depsCandidates = if ($Provider -in @("auto", "directml")) {
     @("D:\Temp\starvalley_ort_dml_deps")
 } else {
     @("D:\Temp\starvalley_ort120_deps")
@@ -24,6 +25,9 @@ $deps = $depsCandidates | Where-Object {
     Test-Path -LiteralPath $_
 } | Select-Object -First 1
 $dist = Join-Path $root "dist"
+if (-not [string]::IsNullOrWhiteSpace($DistPath)) {
+    $dist = [IO.Path]::GetFullPath((Join-Path $root $DistPath))
+}
 $name = "星布谷地钓鱼助手_ONNX_$Provider"
 
 if ([string]::IsNullOrWhiteSpace($python)) {
@@ -44,6 +48,7 @@ $pyinstallerArgs = @(
     "--onedir",
     "--windowed",
     "--uac-admin",
+    "--distpath", $dist,
     "--name", $name,
     "--paths", $deps,
     "--icon", "assets\app_icon.ico",
@@ -106,6 +111,10 @@ if ($buildExitCode -ne 0) {
 }
 
 $releaseDir = Join-Path $dist $name
+& $python (Join-Path $root "onnx_tools\verify_packaged_icu.py") $releaseDir
+if ($LASTEXITCODE -ne 0) {
+    throw "Packaged ICU dependency validation failed"
+}
 Write-Host "ONNX build complete: $releaseDir"
 
 if (-not $KeepBuild) {

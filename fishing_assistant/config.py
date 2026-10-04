@@ -26,7 +26,7 @@ class AppSettings:
     auto_reel_enabled: bool = False
     auto_feed_enabled: bool = False
     preview_only: bool = True
-    preview_enabled: bool = True
+    preview_enabled: bool = False
     pause_when_inactive: bool = True
     confidence: float = 0.05
     bite_action_confidence: float = 0.15
@@ -37,21 +37,21 @@ class AppSettings:
     feed_input_failure_limit: int = 3
     reel_cooldown_seconds: float = 1.5
     inference_result_max_age_seconds: float = 0.30
-    inference_fps: float = 25.0
+    inference_fps: float = 10.0
     preview_fps: float = 12.0
-    capture_fps: float = 30.0
+    capture_fps: float = 10.0
     capture_buffer: int = 2
     capture_source: str = "game_window"
     window_probe_interval_seconds: float = 0.35
     opencv_threads: int = 1
-    yolo_imgsz: int = 960
+    yolo_imgsz: int = 768
     use_cuda: bool = True
     input_method: str = "sendinput_scan"
     monitor_index: int = 0
     capture_device_index: int = 0
     onnx_device_id: int = 1
-    inference_backend: str = "pytorch"
-    onnx_provider: str = "cuda"
+    inference_backend: str = "onnx"
+    onnx_provider: str = "auto"
 
 
 class AppPaths:
@@ -108,11 +108,11 @@ def load_settings(paths: AppPaths) -> AppSettings:
 
     backend = os.environ.get("FISHING_ASSISTANT_BACKEND", "").strip().lower()
     provider = os.environ.get("FISHING_ASSISTANT_ONNX_PROVIDER", "").strip().lower()
+    _migrate_legacy_performance_defaults(defaults, loaded_values)
     if backend in {"pytorch", "onnx"}:
         defaults["inference_backend"] = backend
-    if provider in {"cuda", "directml", "cpu"}:
+    if provider in {"auto", "cuda", "directml", "cpu"}:
         defaults["onnx_provider"] = provider
-    _migrate_legacy_performance_defaults(defaults, loaded_values)
     for key in (
         "master_enabled",
         "bite_detection_enabled",
@@ -132,12 +132,12 @@ def load_settings(paths: AppPaths) -> AppSettings:
     defaults["inference_backend"] = _safe_choice(
         defaults["inference_backend"],
         {"pytorch", "onnx"},
-        "pytorch",
+        "onnx",
     )
     defaults["onnx_provider"] = _safe_choice(
         defaults["onnx_provider"],
-        {"cuda", "directml", "cpu"},
-        "cuda",
+        {"auto", "cuda", "directml", "cpu"},
+        "auto",
     )
     defaults["input_method"] = _safe_choice(
         defaults["input_method"],
@@ -206,7 +206,7 @@ def load_settings(paths: AppPaths) -> AppSettings:
         defaults["inference_fps"],
         1.0,
         60.0,
-        25.0,
+        10.0,
     )
     defaults["preview_fps"] = _bounded_float(
         defaults["preview_fps"],
@@ -214,7 +214,7 @@ def load_settings(paths: AppPaths) -> AppSettings:
         30.0,
         12.0,
     )
-    defaults["capture_fps"] = _bounded_float(defaults["capture_fps"], 5.0, 60.0, 30.0)
+    defaults["capture_fps"] = _bounded_float(defaults["capture_fps"], 5.0, 60.0, 10.0)
     defaults["capture_buffer"] = _bounded_int(defaults["capture_buffer"], 1, 8, 2)
     defaults["window_probe_interval_seconds"] = _bounded_float(
         defaults["window_probe_interval_seconds"],
@@ -231,7 +231,7 @@ def load_settings(paths: AppPaths) -> AppSettings:
         0,
     )
     defaults["onnx_device_id"] = _bounded_int(defaults["onnx_device_id"], 0, 16, 1)
-    defaults["yolo_imgsz"] = _bounded_int(defaults["yolo_imgsz"], 320, 1280, 960)
+    defaults["yolo_imgsz"] = _bounded_int(defaults["yolo_imgsz"], 320, 1280, 768)
     return AppSettings(**defaults)
 
 
@@ -272,13 +272,21 @@ def _migrate_legacy_performance_defaults(
     values: dict[str, object],
     loaded: dict[str, object],
 ) -> None:
-    """Move the pre-window-capture defaults to the current performance baseline."""
+    """Move pre-window-capture settings to the current low-impact baseline."""
     if "capture_source" in loaded or not loaded:
         return
-    if loaded.get("yolo_imgsz") == 1280:
-        values["yolo_imgsz"] = 960
-    if loaded.get("inference_fps") == 30:
-        values["inference_fps"] = 25.0
+    if "preview_enabled" not in loaded:
+        values["preview_enabled"] = False
+    if "capture_fps" not in loaded:
+        values["capture_fps"] = 10.0
+    if loaded.get("inference_fps") in {25, 30, 25.0, 30.0}:
+        values["inference_fps"] = 10.0
+    if loaded.get("yolo_imgsz") in {960, 1280, 960.0, 1280.0}:
+        values["yolo_imgsz"] = 768
+    if "inference_backend" not in loaded:
+        values["inference_backend"] = "onnx"
+    if "onnx_provider" not in loaded:
+        values["onnx_provider"] = "auto"
 
 
 def _bounded_float(

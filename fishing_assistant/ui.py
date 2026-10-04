@@ -94,6 +94,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.paths = AppPaths()
         self.settings = load_settings(self.paths)
+        save_settings(self.paths, self.settings)
         self.controller: WorkerController | None = None
         self.hotkey_thread: QThread | None = None
         self.hotkey_watcher: HotkeyWatcher | None = None
@@ -356,6 +357,7 @@ class MainWindow(QMainWindow):
         self.input_method.addItem("SendInput（虚拟键）", "sendinput_vk")
         self.input_method.addItem("窗口消息（后台优先）", "postmessage")
         self.onnx_provider = QComboBox()
+        self.onnx_provider.addItem("自动选择（推荐）", "auto")
         self.onnx_provider.addItem("DirectML", "directml")
         self.onnx_provider.addItem("CUDA", "cuda")
         self.onnx_provider.addItem("CPU", "cpu")

@@ -1,14 +1,14 @@
 # 星布谷地自动钓鱼助手
 
-Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime DirectML 进行 GPU 推理，识别上钩图标；使用 OpenCV 模板识别右下角红色体力数字，并根据状态执行自动收杆和自动喂食。
+Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime 自动选择 DirectML 或 CPU 推理，识别上钩图标；使用 OpenCV 模板识别右下角红色体力数字，并根据状态执行自动收杆和自动喂食。
 
-当前正式版为 `v1.1.3` 高帧率 DirectML 版本。解压后的目录约 330 MB，压缩包约 141 MB，不依赖本地 Python 或 IDE，解压后即可运行。
+当前正式版为 `v1.1.4` 性能优化版（ONNX Auto），基于用户验证后确认发布的 ICU 修正版。不依赖本地 Python 或 IDE，完整解压后即可运行。用户反馈游戏掉帧略有改善，但尚未彻底解决；正式发布不代表已经消除所有性能影响。
 
 ## 下载
 
-正式版本：[v1.1.3 高帧率版（ONNX DirectML）](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.3-high-fps)
+正式版本：[v1.1.4 性能优化版（ONNX Auto）](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.4)
 
-直接下载：[starvalley-fishing-assistant-onnx-directml-high-fps-20261004.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.3-high-fps/starvalley-fishing-assistant-onnx-directml-high-fps-20261004.zip)
+直接下载：[starvalley-fishing-assistant-v1.1.4-onnx-auto.zip](https://github.com/citiao1/starvalley-fishing-assistant/releases/download/v1.1.4/starvalley-fishing-assistant-v1.1.4-onnx-auto.zip)
 
 上一版正式包：[v1.1.0 正式版（ONNX DirectML）](https://github.com/citiao1/starvalley-fishing-assistant/releases/tag/v1.1.0-optimized-directml)
 
@@ -19,9 +19,21 @@ Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime DirectML 进行 GPU
 下载程序包后：
 
 1. 解压整个目录。
-2. 运行 `星布谷地钓鱼助手_ONNX_directml.exe`。
+2. 运行 `星布谷地钓鱼助手_ONNX_auto.exe`。
 3. 不要单独复制 exe，`_internal` 目录中的 DLL 和模型文件必须保留。
 4. 不要直接在压缩包内运行，建议解压到本地磁盘后再启动。
+5. 升级时解压到新目录，不要覆盖旧目录，避免残留不兼容的 ICU DLL；先用默认配置验证。
+
+## v1.1.4 更新
+
+- 咬杆检测、自动喂食和实时预览全部关闭时，不再启动采集和模型初始化；运行中关闭后暂停采集。
+- 默认采集和推理目标均为 10 FPS，模型输入 768，实时预览关闭。
+- ONNX CPU 推理限制为单线程、顺序执行，推理工作线程降低优先级。
+- Auto 模式仅在 DirectML 测试耗时至少比 CPU 低 20% 时优先选择 DirectML。这是启发式策略，不是游戏帧率保证。
+- 修复 Poppler ICU 78 DLL 混入发行包造成的 `ucnv_open` 入口点错误；构建后自动核验 Qt 所需 ICU 导出符号。
+- 保留全画面咬杆检测、喂食状态转换、前台输入校验和 F12 紧急停止。
+
+详细记录见 [发布总结](docs/release-summary-v1.1.4.md)。
 
 ## 主要功能
 
@@ -31,8 +43,9 @@ Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime DirectML 进行 GPU
 - 支持预览 / 仅识别模式。
 - 默认只采集 `PetitPlanet.exe` 游戏窗口客户区，不把助手窗口或其他桌面内容送入识别。
 - 游戏窗口非前台、最小化、关闭或无法绑定时，默认暂停采集和推理。
-- 默认采集 30 FPS、DXcam 缓冲 2 帧；可切换到指定显示器采集作为兼容回退。
-- 支持选择 DXcam 设备编号和 ONNX DirectML/CUDA 设备编号，界面会显示实际 provider；当前机器实测 ONNX 默认设备 1 更快，DXcam 默认设备 0 可用。
+- 默认采集 10 FPS、DXcam 缓冲 2 帧，默认关闭实时预览；可切换到指定显示器采集作为兼容回退。
+- ONNX 推理后端默认比较 DirectML 和 CPU 的图像推理耗时，优势不足 20% 时优先 CPU；也可以手动选择其他后端，实际可用性取决于安装的运行库。
+- 支持选择 DXcam 设备编号和 ONNX 设备编号，界面会显示实际 provider；DXcam 默认设备 0，ONNX 设备编号默认 1。
 - 支持窗口消息、SendInput 扫描码和虚拟键等输入方式。
 - 显示采集分辨率、识别置信度、推理 FPS、推理耗时、输入目标和最近动作。
 - 显示最近 2 秒滑动 FPS、推理 p50/p95、结果年龄、丢帧计数和 ONNX 实际 provider。
@@ -73,8 +86,10 @@ Windows 桌面自动钓鱼助手。程序使用 ONNX Runtime DirectML 进行 GPU
 
 ## 性能与输入安全
 
-- 默认参数为模型输入 `960`、推理目标 `25 FPS`、预览 `12 FPS`、采集 `30 FPS`、缓冲 `2`，可在设置中调整并通过 p95 指标校准。界面中的推理 FPS 是实际完成速度，不是强制保证值。
-- `模型输入尺寸=1280` 会明显增加 DirectML 推理耗时；如果推理只有约 12 FPS，优先确认设置中的输入尺寸是否仍为 1280。
+- 默认参数为模型输入 `768`、推理目标 `10 FPS`、预览关闭、采集 `10 FPS`、缓冲 `2`，可在设置中调整并通过 p95 指标校准。界面中的推理 FPS 是实际完成速度，不是强制保证值。
+- 自动 provider 会使用随机图像测试完整预处理和推理路径，不直接测量游戏帧时间，因此不能保证消除 GPU 争抢或掉帧。
+- CPU/GPU 总占用率不足以判断游戏流畅度。性能对比应在同一场景、游戏保持前台时，观察游戏进程的帧时间和 p95/p99；助手界面的 FPS 不是游戏 FPS。
+- `模型输入尺寸=960/1280` 会增加推理和桌面复制开销；如果游戏仍卡顿，优先关闭预览、保持自动 provider，并确认采集频率不要高于实际需要。
 - 咬杆检测始终覆盖全屏，不使用固定咬杆 ROI。
 - “全屏”指当前采集区域的完整画面；默认区域是游戏客户区，不能把咬杆图标改成固定坐标 ROI。
 - 游戏非前台或最小化时，默认只保留低频窗口探测，不执行 YOLO、红色数字识别或自动输入。
@@ -92,11 +107,11 @@ python -m pip install -r requirements_onnx_directml.txt
 python .\run_app_onnx.py
 ```
 
-源码运行默认使用 ONNX Runtime DirectML：
+源码运行默认使用 ONNX Runtime 自动 provider：
 
 ```text
 FISHING_ASSISTANT_BACKEND=onnx
-FISHING_ASSISTANT_ONNX_PROVIDER=directml
+FISHING_ASSISTANT_ONNX_PROVIDER=auto
 ```
 
 ## 构建发行版
@@ -104,16 +119,22 @@ FISHING_ASSISTANT_ONNX_PROVIDER=directml
 准备好 Python、PyInstaller 和项目依赖后运行：
 
 ```powershell
-.\build_exe_onnx.ps1 -Provider directml
+.\build_exe_onnx.ps1 -Provider auto
+```
+
+正式版使用独立输出目录，避免覆盖正在运行的旧包：
+
+```powershell
+.\build_exe_onnx.ps1 -Provider auto -KeepBuild -DistPath dist\release-v1.1.4
 ```
 
 输出目录：
 
 ```text
-dist\星布谷地钓鱼助手_ONNX_directml
+dist\星布谷地钓鱼助手_ONNX_auto
 ```
 
-构建脚本会把 PyInstaller 缓存放在项目下的 `build\.pyinstaller-cache`。发布时应分发整个 onedir 目录，而不是只分发 exe。
+构建脚本会把 PyInstaller 缓存放在项目下的 `build\.pyinstaller-cache`，过滤 PATH 中的 Poppler 路径，并通过 `pefile` 检查 ICU 导出符号。请通过脚本构建，不要绕过环境过滤直接重新运行生成的 spec。发布时应分发整个 onedir 目录，而不是只分发 exe。
 
 ## 排障
 
@@ -158,6 +179,8 @@ app_data\diagnostics.json
 3. 不要重命名、移动或单独复制 exe。
 4. 查看 `app_data\startup_error.log`；如果存在 `WinError 126`、`WinError 127` 或 Qt DLL 错误，优先重新解压并更新 Windows。
 
+若提示 `ucnv_open` 入口点缺失，请使用 v1.1.4 并解压到空目录。旧测试包曾混入只导出 `ucnv_open_78` 的 Poppler ICU，不能通过覆盖 exe 修复；不要替换 Windows 系统 DLL。
+
 #### 2. 报“找不到 ONNX 权重”或“找不到红 0 模板”
 
 确认以下文件存在：
@@ -172,13 +195,13 @@ _internal\templates\feed_red_2.png
 
 #### 3. DirectML 不可用、推理启动失败或自动回退 CPU
 
-DirectML 依赖 Windows 图形驱动。先更新核显 / 独显驱动并重启程序，然后在“检测参数”中确认 `ONNX 推理后端` 为 `DirectML`。本机使用 ONNX 设备 1，DXcam 采集设备仍为 0；其他电脑的编号可能不同。
+DirectML 依赖 Windows 图形驱动。默认的“自动选择”会先比较真实图像推理耗时；也可以在“检测参数”中手动选择 `DirectML`。本机使用 ONNX 设备 1，DXcam 采集设备仍为 0；其他电脑的编号可能不同。
 
 如果日志或界面中没有 `DmlExecutionProvider`：
 
 1. 先选择 `CPU` 验证模型和画面采集是否正常。
-2. 如果 CPU 可以运行，说明主要问题是 DirectML 或显卡驱动，不是模型文件。
-3. CPU 模式速度较慢，属于兼容性备用方案。
+2. 如果 CPU 明显快于 DirectML，保留“自动选择”或直接选择 `CPU`；这通常表示 GPU 争抢、跨适配器复制或驱动路径成本较高。
+3. 如果 CPU 也很慢，再检查模型输入尺寸、采集频率和预览开关。
 
 如果指定的 ONNX 设备编号不存在，程序会尝试回退到 DirectML 设备 0，并在日志中明确记录；仍失败时再切换 CPU。
 
@@ -249,7 +272,7 @@ app_data\settings.json
 
 部分推理参数会在下一次安全推理边界生效。如果设置文件损坏或启动后参数异常，关闭程序后删除 `app_data\settings.json`，重新启动即可恢复安全默认值；这不会删除模型和模板。
 
-旧版本曾使用 `1280` 输入尺寸和 `30 FPS` 目标，升级后会自动迁移为当前推荐的 `960` 和 `25 FPS`。如果仍看到旧值，可以在“检测参数”中手动改为 `960`，或删除 `app_data\settings.json` 后重新启动。
+旧版本曾使用 `1280/960` 输入尺寸、`25/30 FPS` 目标和实时预览，升级后会自动迁移为当前推荐的 `768`、`10 FPS`、关闭预览和自动 provider。如果仍看到旧值，可以在“检测参数”中手动改为推荐值，或删除 `app_data\settings.json` 后重新启动。
 
 #### 10. 诊断显示 `torch`、`ultralytics` 或 `torchvision` 缺失
 

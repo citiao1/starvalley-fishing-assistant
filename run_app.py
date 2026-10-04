@@ -22,12 +22,14 @@ def _prepare_dll_search_path() -> None:
             handles.append(os.add_dll_directory(str(root)))
     globals()["_dll_directory_handles"] = handles
 
-    # PySide6's Qt DLLs can fail with WinError 127 under the default
-    # LOAD_LIBRARY_SEARCH mode when bundled by PyInstaller. Preload them
-    # using the legacy module-directory search mode before importing QtCore.
+    # Qt6Core depends on ICU DLLs that PyInstaller places beside the
+    # PySide6 package. Load those dependencies by absolute path first, then
+    # load the binding DLLs with the normal secure search mode.
     preload_paths = (
-        internal / "PySide6" / "Qt6Core.dll",
+        *sorted(internal.glob("icudt*.dll")),
+        *sorted(internal.glob("icuuc*.dll")),
         internal / "shiboken6" / "shiboken6.abi3.dll",
+        internal / "PySide6" / "Qt6Core.dll",
         internal / "PySide6" / "pyside6.abi3.dll",
     )
     preload_handles = []
@@ -36,7 +38,7 @@ def _prepare_dll_search_path() -> None:
         if not path.exists():
             continue
         try:
-            preload_handles.append(ctypes.WinDLL(str(path), winmode=0))
+            preload_handles.append(ctypes.WinDLL(str(path)))
         except OSError as exc:
             preload_errors.append(
                 f"{path.name}: winerror={exc.winerror!r}, {exc}"

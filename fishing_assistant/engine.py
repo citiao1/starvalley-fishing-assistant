@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import ctypes
 import sys
 import threading
 import time
@@ -38,6 +39,15 @@ GAME_ACTIVE = "GAME_ACTIVE"
 GAME_INACTIVE = "GAME_INACTIVE"
 GAME_MINIMIZED = "GAME_MINIMIZED"
 WINDOW_INVALID = "WINDOW_INVALID"
+
+
+def _needs_frame_processing(settings: AppSettings) -> bool:
+    """Return whether the current settings require capture or inference."""
+    return bool(
+        settings.bite_detection_enabled
+        or settings.auto_feed_enabled
+        or settings.preview_enabled
+    )
 
 
 class BiteDetector:
@@ -162,12 +172,15 @@ class ScreenCapture:
         self._region_kind = "monitor"
         self._window_hwnd = 0
         self._primary_monitor_index = 1
+        self._started = False
         self.backend_name = "未打开"
         self.backend_error = ""
 
-    def open(self) -> None:
+    def prepare(self) -> None:
         import mss
 
+        if self._mss is not None:
+            return
         self._mss = mss.MSS()
         self._monitors = list(self._mss.monitors)
         self._primary_monitor_index = next(
@@ -182,12 +195,65 @@ class ScreenCapture:
             self.monitor_index = self._primary_monitor_index
         elif len(self._monitors) <= self.monitor_index:
             self.monitor_index = self._primary_monitor_index
-        self._apply_monitor_region(self.monitor_index, restart=False)
+        if self.capture_source == "monitor":
+            self._apply_monitor_region(self.monitor_index, restart=False)
+        else:
+            self.backend_name = "等待游戏窗口"
+
+    def resolve_target_region(self, info: TargetWindowInfo) -> bool:
+        if self.capture_source != "game_window":
+            return self._screen_region is not None
+        rect = info.client_rect
+        if (
+            not info.valid
+            or info.is_minimized
+            or rect is None
+            or rect[2] - rect[0] < 16
+            or rect[3] - rect[1] < 16
+        ):
+            self._clear_target_region()
+            return False
+        selected = self._monitor_for_rect(rect)
+        if selected is None:
+            self._clear_target_region()
+            return False
+        monitor_index, _ = selected
+        self._set_region(
+            "game_window",
+            rect,
+            monitor_index,
+            info.hwnd,
+            restart=self._started,
+        )
+        return True
+
+    def start(self) -> bool:
+        if self._mss is None:
+            self.prepare()
+        if self._screen_region is None or self.monitor is None:
+            self.backend_name = "等待游戏窗口"
+            return False
+        if self._started:
+            return True
         self._start_dxcam()
+        self._started = True
+        return True
+
+    def pause(self) -> None:
+        if not self._started:
+            return
+        self._stop_dxcam()
+        self._started = False
+        self.backend_name = f"已暂停 ({self._region_kind})"
+
+    def open(self) -> None:
+        """Compatibility wrapper for callers that still use the old lifecycle."""
+        self.prepare()
         if self.capture_source == "game_window":
-            self.update_window(
+            self.resolve_target_region(
                 self.input_controller.refresh_target(force=True),
             )
+        self.start()
 
     def _output_index(self, monitor_index: int) -> int | None:
         return (
@@ -240,25 +306,29 @@ class ScreenCapture:
             "width": right - left,
             "height": bottom - top,
         }
-        if changed and restart and self._dxcam is not None:
+        if changed and restart and self._started and self._dxcam is not None:
             self._start_dxcam()
         return changed
+
+    def _clear_target_region(self) -> None:
+        if self.capture_source != "game_window":
+            return
+        if getattr(self, "_dxcam", None) is not None:
+            self._stop_dxcam()
+        self._started = False
+        self._region_key = None
+        self._region_kind = "game_window"
+        self._window_hwnd = 0
+        self._screen_region = None
+        self._mss_region = None
+        self.backend_name = "等待游戏窗口"
 
     def _start_dxcam(self) -> None:
         import dxcam
 
-        if self._dxcam is not None:
-            try:
-                self._dxcam.stop()
-            except Exception:
-                pass
-            try:
-                self._dxcam.release()
-            except Exception:
-                pass
-            self._dxcam = None
+        self._stop_dxcam()
         if self.monitor is None or self._screen_region is None:
-            self.backend_name = "mss fallback"
+            self.backend_name = "等待游戏窗口"
             return
         monitor_left = int(self.monitor["left"])
         monitor_top = int(self.monitor["top"])
@@ -290,7 +360,7 @@ class ScreenCapture:
                 f"output {output_index})"
             )
         except Exception as exc:
-            self._dxcam = None
+            self._stop_dxcam()
             self.backend_error = f"{type(exc).__name__}: {exc}"
             self.backend_name = f"mss fallback ({self._region_kind})"
 
@@ -326,38 +396,14 @@ class ScreenCapture:
         return min(candidates, key=distance) if candidates else None
 
     def update_window(self, info: TargetWindowInfo) -> bool:
-        if self.capture_source != "game_window":
-            return False
-        rect = info.client_rect
-        if (
-            not info.valid
-            or info.is_minimized
-            or rect is None
-            or rect[2] - rect[0] < 16
-            or rect[3] - rect[1] < 16
-        ):
-            if self._region_kind != "monitor":
-                return self._apply_monitor_region(
-                    self._primary_monitor_index,
-                    restart=True,
-                )
-            return False
-        selected = self._monitor_for_rect(rect)
-        if selected is None:
-            return False
-        monitor_index, _ = selected
-        return self._set_region(
-            "game_window",
-            rect,
-            monitor_index,
-            info.hwnd,
-            restart=True,
-        )
+        return self.resolve_target_region(info)
 
     def grab(self) -> np.ndarray:
-        if self._mss is None or self.monitor is None:
+        if self._mss is None or self.monitor is None or not self._started:
             self.open()
         assert self._mss is not None
+        if self._screen_region is None or self._mss_region is None:
+            raise RuntimeError("游戏窗口尚未准备好采集")
         if self._dxcam is not None:
             frame = self._dxcam.get_latest_frame(copy=True)
             if frame is not None:
@@ -378,23 +424,37 @@ class ScreenCapture:
         return self._region_kind
 
     @property
+    def is_started(self) -> bool:
+        return self._started
+
+    @property
     def capture_device(self) -> str:
         return f"dxcam device {self.capture_device_index}"
 
     def close(self) -> None:
+        self._stop_dxcam()
+        self._started = False
+        self._screen_region = None
+        self._mss_region = None
+        self._region_key = None
         if self._dxcam is not None:
-            try:
-                self._dxcam.stop()
-            except Exception:
-                pass
-            try:
-                self._dxcam.release()
-            except Exception:
-                pass
             self._dxcam = None
         if self._mss is not None:
             self._mss.close()
             self._mss = None
+
+    def _stop_dxcam(self) -> None:
+        if getattr(self, "_dxcam", None) is None:
+            return
+        try:
+            self._dxcam.stop()
+        except Exception:
+            pass
+        try:
+            self._dxcam.release()
+        except Exception:
+            pass
+        self._dxcam = None
 
 
 class SessionLogger:
@@ -483,6 +543,7 @@ class DetectionWorker(QObject):
         self._next_preview_at = 0.0
         self._activity_state = WINDOW_INVALID
         self._last_window_description = ""
+        self._inference_priority_set = False
 
     @Slot(object)
     def apply_settings(self, settings: AppSettings) -> None:
@@ -548,7 +609,17 @@ class DetectionWorker(QObject):
         )
         if not settings.auto_feed_enabled or not settings.master_enabled:
             self._feed_state.reset()
-        if self._bite is not None:
+        inference_settings_changed = any(
+            getattr(previous, name) != getattr(settings, name)
+            for name in (
+                "confidence",
+                "use_cuda",
+                "yolo_imgsz",
+                "onnx_provider",
+                "onnx_device_id",
+            )
+        )
+        if self._bite is not None and inference_settings_changed:
             if isinstance(self._bite, OnnxBiteDetector):
                 changed = self._bite.configure(
                     settings.confidence,
@@ -632,6 +703,25 @@ class DetectionWorker(QObject):
         )
         try:
             self._input.clear_emergency_stop()
+            self._preview_started_at = time.perf_counter()
+            self._last_metrics_at = 0.0
+            self._next_preview_at = 0.0
+            self._capture_frames = 0
+            self._inference_frames = 0
+            self._set_status("检测和预览均已关闭")
+            while (
+                not self._stop_event.is_set()
+                and not _needs_frame_processing(self.settings)
+            ):
+                QCoreApplication.processEvents()
+                self._apply_emergency_stop()
+                self._apply_pending_settings_if_idle()
+                self._emit_metrics(None)
+                time.sleep(0.10)
+            if self._stop_event.is_set():
+                return
+
+            startup_started = time.perf_counter()
             self._capture = ScreenCapture(
                 self.settings.monitor_index,
                 self._input,
@@ -640,8 +730,21 @@ class DetectionWorker(QObject):
                 capture_buffer=self.settings.capture_buffer,
                 capture_device_index=self.settings.capture_device_index,
             )
-            self._capture.open()
-            self._log("info", f"屏幕采集已打开: {self._capture.size}", force=True)
+            self._capture.prepare()
+            target_started = time.perf_counter()
+            target_info = self._input.refresh_target(force=True)
+            target_resolve_ms = (time.perf_counter() - target_started) * 1000
+            if self.settings.capture_source == "game_window":
+                target_ready = self._capture.resolve_target_region(target_info)
+            else:
+                target_ready = self._capture.size != (0, 0)
+            self._log(
+                "info",
+                f"采集区域已准备: source={self.settings.capture_source} / "
+                f"ready={target_ready} / size={self._capture.size} / "
+                f"target_resolve_ms={target_resolve_ms:.1f}",
+                force=True,
+            )
             self._log(
                 "info",
                 f"屏幕采集后端: {self._capture.backend_name} / "
@@ -651,13 +754,8 @@ class DetectionWorker(QObject):
                 f"device={self._capture.capture_device}",
                 force=True,
             )
-            if self._capture.backend_error:
-                self._log(
-                    "warning",
-                    f"DXcam 不可用，已回退 mss：{self._capture.backend_error}",
-                    force=True,
-                )
 
+            model_started = time.perf_counter()
             if self.settings.inference_backend == "onnx":
                 if not self.paths.onnx_model_path.exists():
                     raise FileNotFoundError(
@@ -694,6 +792,18 @@ class DetectionWorker(QObject):
                     self.settings.use_cuda,
                 )
             self._log("info", self._bite.load(), force=True)
+            onnx_load_ms = (time.perf_counter() - model_started) * 1000
+            warmup_started = time.perf_counter()
+            warmup = getattr(self._bite, "warmup", None)
+            warmup_ms = float(warmup()) if callable(warmup) else 0.0
+            if warmup_ms <= 0.0:
+                warmup_ms = (time.perf_counter() - warmup_started) * 1000
+            self._log(
+                "info",
+                f"推理初始化完成: load_ms={onnx_load_ms:.1f} / "
+                f"warmup_ms={warmup_ms:.1f}",
+                force=True,
+            )
             if isinstance(self._bite, OnnxBiteDetector) and self._bite.last_error:
                 self._log(
                     "warning",
@@ -710,8 +820,14 @@ class DetectionWorker(QObject):
                 self.paths.nonzero_template_path,
             )
             self._log("info", "OpenCV 红色数字检测器已加载", force=True)
-            # Start the FPS window after model/template initialization so the
-            # startup delay does not permanently depress the displayed rate.
+            self._log(
+                "info",
+                f"屏幕采集等待前台启动: ready={target_ready} / "
+                f"total_startup_ms={(time.perf_counter() - startup_started) * 1000:.1f}",
+                force=True,
+            )
+            # Start the active FPS window after model/template initialization
+            # so the startup delay does not depress the displayed rate.
             self._preview_started_at = time.perf_counter()
             self._last_metrics_at = 0.0
             self._next_preview_at = 0.0
@@ -728,6 +844,13 @@ class DetectionWorker(QObject):
                     next_event_pump_at = loop_now + 0.10
                 self._apply_emergency_stop()
                 self._apply_pending_settings_if_idle()
+                if not _needs_frame_processing(self.settings):
+                    if self._capture.is_started:
+                        self._capture.pause()
+                    self._emit_metrics(None)
+                    self._set_status("检测和预览均已关闭")
+                    time.sleep(0.10)
+                    continue
                 target_info = self._input.refresh_target()
                 self._update_activity_state(target_info)
                 if target_info.description != self._last_window_description:
@@ -743,6 +866,7 @@ class DetectionWorker(QObject):
                     self.settings.pause_when_inactive
                     and self._activity_state != GAME_ACTIVE
                 ):
+                    self._capture.pause()
                     self._emit_metrics(None)
                     time.sleep(
                         0.20
@@ -750,9 +874,36 @@ class DetectionWorker(QObject):
                         else 0.05
                     )
                     continue
+                capture_was_started = self._capture.is_started
+                capture_started = time.perf_counter()
+                if not self._capture.start():
+                    self._emit_metrics(None)
+                    time.sleep(0.10)
+                    continue
+                if not capture_was_started:
+                    self._log(
+                        "info",
+                        f"屏幕采集启动完成: start_ms="
+                        f"{(time.perf_counter() - capture_started) * 1000:.1f} / "
+                        f"backend={self._capture.backend_name}",
+                        force=True,
+                    )
+                    if self._capture.backend_error:
+                        self._log(
+                            "warning",
+                            f"DXcam 不可用，已回退 mss：{self._capture.backend_error}",
+                            force=True,
+                        )
                 started = time.perf_counter()
                 capture_started = time.perf_counter()
                 frame = self._capture.grab()
+                if self._capture_frames == 0:
+                    self._log(
+                        "info",
+                        f"首帧已采集: first_frame_ms="
+                        f"{(time.perf_counter() - capture_started) * 1000:.1f}",
+                        force=True,
+                    )
                 self._last_capture_ms = (time.perf_counter() - capture_started) * 1000
                 self._timing_samples["capture_ms"].append(self._last_capture_ms)
                 self._capture_frames += 1
@@ -789,30 +940,51 @@ class DetectionWorker(QObject):
                 )
                 if self._inference_future is None and now >= next_inference_at:
                     settings_snapshot = replace(self.settings)
-                    resize_started = time.perf_counter()
-                    inference_frame, scale_x, scale_y = (
-                        self._bite.resize_for_inference(
-                            frame,
-                            max_width=settings_snapshot.yolo_imgsz,
+                    needs_inference = bool(
+                        settings_snapshot.bite_detection_enabled
+                        or settings_snapshot.auto_feed_enabled
+                        or settings_snapshot.preview_enabled
+                    )
+                    if needs_inference:
+                        resize_started = time.perf_counter()
+                        inference_frame, scale_x, scale_y = (
+                            self._bite.resize_for_inference(
+                                frame,
+                                max_width=settings_snapshot.yolo_imgsz,
+                            )
+                            if (
+                                self._bite is not None
+                                and settings_snapshot.bite_detection_enabled
+                            )
+                            else (frame, 1.0, 1.0)
                         )
-                        if self._bite is not None
-                        else (frame, 1.0, 1.0)
-                    )
-                    self._last_resize_ms = (time.perf_counter() - resize_started) * 1000
-                    self._timing_samples["resize_ms"].append(self._last_resize_ms)
-                    feed_x1, feed_y1, feed_x2, feed_y2 = (
-                        self._feed_roi_bounds(frame)
-                    )
-                    self._inference_future = self._executor.submit(
-                        self._detect_frame,
-                        inference_frame,
-                        frame[feed_y1:feed_y2, feed_x1:feed_x2].copy(),
-                        scale_x,
-                        scale_y,
-                        settings_snapshot,
-                        time.monotonic(),
-                    )
-                    next_inference_at = now + inference_interval
+                        self._last_resize_ms = (
+                            time.perf_counter() - resize_started
+                        ) * 1000
+                        self._timing_samples["resize_ms"].append(
+                            self._last_resize_ms
+                        )
+                        feed_x1, feed_y1, feed_x2, feed_y2 = (
+                            self._feed_roi_bounds(frame)
+                        )
+                        feed_frame = (
+                            frame[feed_y1:feed_y2, feed_x1:feed_x2].copy()
+                            if (
+                                settings_snapshot.auto_feed_enabled
+                                or settings_snapshot.preview_enabled
+                            )
+                            else frame[0:0, 0:0].copy()
+                        )
+                        self._inference_future = self._executor.submit(
+                            self._detect_frame,
+                            inference_frame,
+                            feed_frame,
+                            scale_x,
+                            scale_y,
+                            settings_snapshot,
+                            time.monotonic(),
+                        )
+                        next_inference_at = now + inference_interval
                 elif self._inference_future is not None and now >= next_inference_at:
                     self._inference_skipped += 1
                     next_inference_at = now + inference_interval
@@ -872,6 +1044,8 @@ class DetectionWorker(QObject):
         settings: AppSettings,
         captured_at: float,
     ) -> DetectionResult:
+        if not self._inference_priority_set:
+            self._set_inference_thread_priority()
         started = time.perf_counter()
         bite_boxes: list[tuple[int, int, int, int, float]] = []
         bite_confidence = 0.0
@@ -891,7 +1065,10 @@ class DetectionWorker(QObject):
                 for x1, y1, x2, y2, confidence in detected_boxes
             ]
             timing.update(getattr(self._bite, "last_timing", {}))
-        if self._feed is not None:
+        if (
+            self._feed is not None
+            and (settings.auto_feed_enabled or settings.preview_enabled)
+        ):
             feed_started = time.perf_counter()
             feed_label, zero_score, nonzero_score = self._feed.classify_roi(feed_roi)
             timing["feed_ms"] = (time.perf_counter() - feed_started) * 1000
@@ -907,6 +1084,20 @@ class DetectionWorker(QObject):
             captured_at=captured_at,
             timing=timing,
         )
+
+    def _set_inference_thread_priority(self) -> None:
+        self._inference_priority_set = True
+        if sys.platform != "win32":
+            return
+        try:
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetCurrentThread.restype = ctypes.c_void_p
+            kernel32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            kernel32.SetThreadPriority.restype = ctypes.c_bool
+            # THREAD_PRIORITY_BELOW_NORMAL
+            kernel32.SetThreadPriority(kernel32.GetCurrentThread(), -1)
+        except Exception:
+            self._log("debug", "无法降低推理线程优先级")
 
     def _update_activity_state(self, info: TargetWindowInfo) -> None:
         if not info.valid:
