@@ -1,6 +1,6 @@
 param(
-    [ValidateSet("directml", "cuda")]
-    [string]$Provider = "directml",
+    [ValidateSet("auto", "directml", "cuda")]
+    [string]$Provider = "auto",
     [switch]$KeepBuild
 )
 
@@ -15,7 +15,7 @@ $pythonCandidates = @(
 $python = $pythonCandidates | Where-Object {
     Test-Path -LiteralPath $_
 } | Select-Object -First 1
-$depsCandidates = if ($Provider -eq "directml") {
+$depsCandidates = if ($Provider -in @("auto", "directml")) {
     @("D:\Temp\starvalley_ort_dml_deps")
 } else {
     @("D:\Temp\starvalley_ort120_deps")

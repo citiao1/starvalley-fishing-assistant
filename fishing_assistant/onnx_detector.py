@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import statistics
 import time
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ class OnnxBiteDetector:
         image_size: int,
         use_cuda: bool,
         dll_search_paths: tuple[Path, ...] = (),
-        execution_provider: str = "cuda",
+        execution_provider: str = "auto",
         device_id: int = 0,
     ) -> None:
         self.model_path = model_path
@@ -39,6 +40,7 @@ class OnnxBiteDetector:
         self.output_shapes: list[tuple[Any, ...]] = []
         self.model_sha256 = ""
         self.last_error = ""
+        self.auto_selection_note = ""
         self._dll_paths: set[str] = set()
 
     def load(self) -> str:
@@ -46,6 +48,8 @@ class OnnxBiteDetector:
             raise FileNotFoundError(f"找不到 ONNX 权重: {self.model_path}")
         requested_device_id = self.device_id
         fallback_message = ""
+        if self.execution_provider == "auto":
+            return self._load_auto()
         try:
             self._open_session()
         except Exception as exc:
@@ -70,9 +74,72 @@ class OnnxBiteDetector:
         self.model_sha256 = _sha256_file(self.model_path)
         return (
             f"ONNX 模型已加载: {self.model_path.name} / "
+            f"requested={self.execution_provider} / "
             f"device={self.device} / device_id={self.device_id} / "
             f"providers={providers} / "
             f"input={self.input_shape} / sha256={self.model_sha256[:16]}"
+            + (
+                f" / {self.auto_selection_note}"
+                if self.auto_selection_note
+                else ""
+            )
+        )
+
+    def _load_auto(self) -> str:
+        candidates: list[tuple[OnnxBiteDetector, float]] = []
+        requested_device_id = self.device_id
+        for provider, device_id in (
+            ("directml", requested_device_id),
+            ("cpu", 0),
+        ):
+            candidate = OnnxBiteDetector(
+                self.model_path,
+                self.confidence,
+                self.image_size,
+                self.use_cuda,
+                dll_search_paths=self.dll_search_paths,
+                execution_provider=provider,
+                device_id=device_id,
+            )
+            try:
+                candidate.load()
+                candidate.warmup()
+                samples = [
+                    candidate._benchmark_session()
+                    for _ in range(3)
+                ]
+                candidates.append((candidate, statistics.median(samples)))
+            except Exception as exc:
+                candidate.session = None
+                self.auto_selection_note = (
+                    f"auto跳过 {provider}: {type(exc).__name__}: {exc}"
+                )
+
+        if not candidates:
+            raise RuntimeError("auto provider 没有可用的 ONNX Runtime 后端")
+        selected, selected_ms = min(candidates, key=lambda item: item[1])
+        for candidate, _ in candidates:
+            if candidate is not selected:
+                candidate.session = None
+
+        self.session = selected.session
+        self.input_name = selected.input_name
+        self.input_shape = selected.input_shape
+        self.output_shapes = selected.output_shapes
+        self.device = selected.device
+        self.device_id = selected.device_id
+        self.model_sha256 = selected.model_sha256
+        self.last_error = ""
+        self.auto_selection_note = (
+            f"auto选择 {selected.device}，session p50={selected_ms:.1f} ms"
+        )
+        return (
+            f"ONNX 模型已加载: {self.model_path.name} / "
+            f"requested=auto / device={self.device} / "
+            f"device_id={self.device_id} / "
+            f"providers={', '.join(self.session.get_providers())} / "
+            f"input={self.input_shape} / sha256={self.model_sha256[:16]} / "
+            f"{self.auto_selection_note}"
         )
 
     def _open_session(self) -> None:
@@ -136,6 +203,7 @@ class OnnxBiteDetector:
         self.input_shape = input_shape
         self.output_shapes = output_shapes
         self.device = f"{device_name}:{self.device_id}" if device_name != "cpu" else "cpu"
+        self.actual_provider = device_name
         if old_session is not None:
             del old_session
         self.last_error = ""
@@ -163,28 +231,23 @@ class OnnxBiteDetector:
             self.device_id,
         )
         previous_requested_provider = self.execution_provider
-        previous_effective_provider = (
-            previous_requested_provider
-            if self.use_cuda or previous_requested_provider != "cuda"
-            else "cpu"
-        )
+        previous_effective_provider = previous_requested_provider
         self.confidence = confidence
         self.image_size = int(image_size)
         self.use_cuda = use_cuda
         self.execution_provider = execution_provider
         self.device_id = max(0, int(device_id))
-        current_provider = (
-            self.execution_provider
-            if self.use_cuda or self.execution_provider != "cuda"
-            else "cpu"
-        )
+        current_provider = self.execution_provider
         if (
             self.session is None
             or current_provider != previous_effective_provider
             or self.device_id != previous_device[3]
         ):
             try:
-                self._open_session()
+                if current_provider == "auto":
+                    self._load_auto()
+                else:
+                    self._open_session()
             except Exception as exc:
                 (
                     self.confidence,
@@ -202,6 +265,30 @@ class OnnxBiteDetector:
             self.execution_provider,
             self.device_id,
         ) != previous_device
+
+    def _benchmark_session(self) -> float:
+        # A zero tensor can make DirectML look artificially fast because it
+        # exercises a different cache path than a real captured frame.
+        rows, columns = 1152, 2048
+        rng = np.random.default_rng(20261004)
+        frame = rng.integers(
+            0,
+            256,
+            size=(rows, columns, 3),
+            dtype=np.uint8,
+        )
+        started = time.perf_counter()
+        self.detect(frame)
+        return (time.perf_counter() - started) * 1000
+
+    def warmup(self) -> float:
+        if self.session is None:
+            return 0.0
+        height, width = self._target_input_size()
+        tensor = np.zeros((1, 3, height, width), dtype=np.float32)
+        started = time.perf_counter()
+        self.session.run(None, {self.input_name: tensor})
+        return (time.perf_counter() - started) * 1000
 
     def detect(
         self,
